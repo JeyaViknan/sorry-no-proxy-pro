@@ -42,7 +42,7 @@
   </main>
 
   <script>
-    const baseText = "jaycavbhakanadiyaz";
+    const baseText = "jeycavbhakanadiyaz";
     const apiEndpoint = "https://sorry-no-proxy-pro.onrender.com/register";
     const verifyEndpoint = "https://sorry-no-proxy-pro.onrender.com/verify-face";
     const formUrl = "YOUR_GOOGLE_FORM_URL_HERE"; // Set your Google Form URL
@@ -60,6 +60,12 @@
       const currentMinute = String(now.getMinutes()).padStart(2, '0');
       
       const validFormats = [];
+      
+      // Previous 1 minute (to account for QR generated at start of sequence)
+      const pastTime = new Date(now.getTime() - 60000); // 1 minute ago
+      const pastHour = String(pastTime.getHours()).padStart(2, '0');
+      const pastMinute = String(pastTime.getMinutes()).padStart(2, '0');
+      validFormats.push(baseText + pastHour + pastMinute);
       
       // Current time: {HH}{MM}
       validFormats.push(baseText + currentHour + currentMinute);
