@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: attendance-app
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && pip3 install -r requirements.txt
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        fromService:
+          type: web
+          name: attendance-app
+          property: port
+      - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+        sync: false
+      - key: GOOGLE_PRIVATE_KEY
+        sync: false
+      - key: SHEET_ID
+        sync: false
