@@ -273,28 +273,35 @@ def load_model_and_data():
             model = None
     
     if label_map is None:
-        print("Building label map from image filenames...", file=sys.stderr)
+        print(f"Building label map from image filenames in {IMAGES_DIR}...", file=sys.stderr)
         label_map = {}
 
         if not os.path.isdir(IMAGES_DIR):
             print(f"Images directory not found at {IMAGES_DIR}", file=sys.stderr)
         else:
-            for fname in os.listdir(IMAGES_DIR):
-                # Only consider common image extensions
-                if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
-                    continue
+            for root, _, files in os.walk(IMAGES_DIR):
+                for fname in files:
+                    # Only consider common image extensions
+                    if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
+                        continue
 
-                stem = os.path.splitext(fname)[0]
-                # Treat the part before the first underscore as the registration number
-                regno = stem.split("_")[0].strip()
-                if not regno:
-                    continue
+                    stem = os.path.splitext(fname)[0]
+                    # Treat the part before the first underscore as the registration number
+                    regno = stem.split("_")[0].strip()
+                    if not regno:
+                        continue
 
-                if regno not in label_map:
-                    label_map[regno] = []
-                label_map[regno].append(fname)
+                    if regno not in label_map:
+                        label_map[regno] = []
+
+                    rel_path = os.path.relpath(os.path.join(root, fname), IMAGES_DIR)
+                    label_map[regno].append(rel_path)
 
         print(f"Loaded {len(label_map)} registration numbers from images.", file=sys.stderr)
+        if label_map:
+            # Log a few sample keys for debugging
+            sample_keys = list(label_map.keys())[:5]
+            print(f"Sample registration numbers found: {sample_keys}", file=sys.stderr)
     
     # Load face detector
     load_face_detector()
