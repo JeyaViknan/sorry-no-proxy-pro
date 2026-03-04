@@ -248,6 +248,12 @@
         return;
       }
 
+      // Show captured image preview and hide live video
+      if (faceVideo && faceCanvas) {
+        faceCanvas.style.display = "block";
+        faceVideo.style.display = "none";
+      }
+
       btn.style.display = "none";
       loading.style.display = "block";
       result.innerText = "";
@@ -273,6 +279,16 @@
         if (!verifyData.verified) {
           faceStatus.innerText = `Face verification failed: ${verifyData.message || "Face does not match registration number"}`;
           faceStatus.style.color = "#d32f2f";
+          // Restore live video for retry
+          if (faceVideo && faceCanvas) {
+            faceCanvas.style.display = "none";
+            faceVideo.style.display = "block";
+            try {
+              faceVideo.play();
+            } catch (e) {
+              console.warn("Unable to resume video:", e);
+            }
+          }
           loading.style.display = "none";
           btn.style.display = "block";
           return;
