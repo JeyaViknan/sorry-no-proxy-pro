@@ -4,8 +4,6 @@ Face Verification Service
 Uses face detection and improved feature extraction to verify if a captured face matches a registration number.
 """
 
-import pickle
-import pandas as pd
 import numpy as np
 import cv2
 import base64
@@ -17,13 +15,11 @@ from pathlib import Path
 # Get script directory for relative paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load the model and data once at startup
-MODEL_PATH = os.path.join(SCRIPT_DIR, "face_classifier_model.pkl")
+# Data paths
 PRIMARY_IMAGES_DIR = os.path.join(SCRIPT_DIR, "data", "images")
 FALLBACK_IMAGES_DIR = os.path.join(SCRIPT_DIR, "data")
 
 # Global variables to store loaded model and data
-model = None
 label_map = None  # mapping: register_number -> list of image filenames
 face_detector = None
 face_embeddings_cache = {}
@@ -162,37 +158,13 @@ def extract_face_features_improved(image):
     except:
         pass
     
-    # 2. Local Binary Pattern (LBP) features
-    try:
-        # Simple LBP implementation
-        lbp = np.zeros_like(gray)
-        for i in range(1, gray.shape[0] - 1):
-            for j in range(1, gray.shape[1] - 1):
-                center = gray[i, j]
-                code = 0
-                code |= (gray[i-1, j-1] >= center) << 7
-                code |= (gray[i-1, j] >= center) << 6
-                code |= (gray[i-1, j+1] >= center) << 5
-                code |= (gray[i, j+1] >= center) << 4
-                code |= (gray[i+1, j+1] >= center) << 3
-                code |= (gray[i+1, j] >= center) << 2
-                code |= (gray[i+1, j-1] >= center) << 1
-                code |= (gray[i, j-1] >= center) << 0
-                lbp[i, j] = code
-        
-        # Histogram of LBP
-        hist, _ = np.histogram(lbp.ravel(), bins=256, range=(0, 256))
-        features.extend(hist)
-    except:
-        pass
-    
-    # 3. Color histogram features (for RGB images)
+    # 2. Color histogram features (for RGB images)
     if len(face_roi.shape) == 3:
         for channel in range(3):
             hist = cv2.calcHist([face_roi], [channel], None, [32], [0, 256])
             features.extend(hist.flatten())
     
-    # 4. Normalized pixel values (smaller, focused region)
+    # 3. Normalized pixel values (smaller, focused region)
     face_normalized = face_roi.astype(np.float32) / 255.0
     # Use a smaller representation
     face_small = cv2.resize(face_normalized, (64, 64))
@@ -264,18 +236,7 @@ def load_model_and_data():
       e.g. "22CS001.jpg", "22CS001_1.png", "22CS001_profile.jpeg"
       The register number is taken as the filename stem up to the first underscore.
     """
-    global model, label_map
-    
-    if model is None:
-        try:
-            if os.path.exists(MODEL_PATH):
-                print("Loading face classifier model...", file=sys.stderr)
-                with open(MODEL_PATH, 'rb') as f:
-                    model = pickle.load(f)
-                print("Model loaded successfully.", file=sys.stderr)
-        except Exception as e:
-            print(f"Could not load model file: {e}", file=sys.stderr)
-            model = None
+    global label_map
     
     if label_map is None:
         image_roots = []
@@ -328,7 +289,7 @@ def load_model_and_data():
     # Load face detector
     load_face_detector()
     
-    return model, label_map
+    return label_map
 
 def get_cached_embeddings(regno):
     """Get cached face embeddings for a registration number."""
@@ -346,7 +307,7 @@ def cache_embeddings(regno, embeddings):
 
 def verify_face(register_number, base64_image):
     """Verify if the captured face matches the given registration number."""
-    global model, label_map
+    global label_map
     
     # Load model and data if not already loaded
     if label_map is None:
