@@ -19,7 +19,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Load the model and data once at startup
 MODEL_PATH = os.path.join(SCRIPT_DIR, "face_classifier_model.pkl")
-IMAGES_DIR = os.path.join(SCRIPT_DIR, "data", "images")
+PRIMARY_IMAGES_DIR = os.path.join(SCRIPT_DIR, "data", "images")
+FALLBACK_IMAGES_DIR = os.path.join(SCRIPT_DIR, "data")
 
 # Global variables to store loaded model and data
 model = None
@@ -250,6 +251,11 @@ def calculate_similarity(features1, features2):
     
     return float(combined_similarity)
 
+def normalize_regno(value):
+    """Normalize registration number for consistent lookups."""
+    return str(value).strip().upper()
+
+
 def load_model_and_data():
     """Load the face classifier model (if available) and build label mapping from image filenames.
 
@@ -273,13 +279,27 @@ def load_model_and_data():
             model = None
     
     if label_map is None:
-        print(f"Building label map from image filenames in {IMAGES_DIR}...", file=sys.stderr)
-        label_map = {}
+        image_roots = []
+        if os.path.isdir(PRIMARY_IMAGES_DIR):
+            image_roots.append(PRIMARY_IMAGES_DIR)
+        if os.path.isdir(FALLBACK_IMAGES_DIR):
+            image_roots.append(FALLBACK_IMAGES_DIR)
 
-        if not os.path.isdir(IMAGES_DIR):
-            print(f"Images directory not found at {IMAGES_DIR}", file=sys.stderr)
+        if PRIMARY_IMAGES_DIR in image_roots and FALLBACK_IMAGES_DIR in image_roots:
+            print(
+                f"Building label map from image filenames in {PRIMARY_IMAGES_DIR} and {FALLBACK_IMAGES_DIR}...",
+                file=sys.stderr
+            )
+        elif image_roots:
+            print(f"Building label map from image filenames in {image_roots[0]}...", file=sys.stderr)
         else:
-            for root, _, files in os.walk(IMAGES_DIR):
+            print(f"Images directory not found at {PRIMARY_IMAGES_DIR} or {FALLBACK_IMAGES_DIR}", file=sys.stderr)
+
+        label_map = {}
+        seen_files = set()
+
+        for image_root in image_roots:
+            for root, _, files in os.walk(image_root):
                 for fname in files:
                     # Only consider common image extensions
                     if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
@@ -287,15 +307,18 @@ def load_model_and_data():
 
                     stem = os.path.splitext(fname)[0]
                     # Treat the part before the first underscore as the registration number
-                    regno = stem.split("_")[0].strip()
+                    regno = normalize_regno(stem.split("_")[0])
                     if not regno:
                         continue
 
                     if regno not in label_map:
                         label_map[regno] = []
 
-                    rel_path = os.path.relpath(os.path.join(root, fname), IMAGES_DIR)
-                    label_map[regno].append(rel_path)
+                    image_path = os.path.join(root, fname)
+                    if image_path in seen_files:
+                        continue
+                    seen_files.add(image_path)
+                    label_map[regno].append(image_path)
 
         print(f"Loaded {len(label_map)} registration numbers from images.", file=sys.stderr)
         if label_map:
@@ -331,7 +354,7 @@ def verify_face(register_number, base64_image):
         load_model_and_data()
     
     # Check if registration number exists in database
-    register_number = str(register_number).strip()
+    register_number = normalize_regno(register_number)
     if register_number not in label_map:
         return {
             'verified': False,
@@ -360,8 +383,7 @@ def verify_face(register_number, base64_image):
         best_similarity = 0
         all_ref_features = []
         
-        for filename in reference_filenames:
-            image_path = os.path.join(IMAGES_DIR, filename)
+        for image_path in reference_filenames:
             if os.path.exists(image_path):
                 ref_features = extract_face_features(image_path)
                 if ref_features is not None:
