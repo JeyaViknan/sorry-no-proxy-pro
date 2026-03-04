@@ -180,6 +180,16 @@ button:active {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
+#faceCanvas {
+  width: 100%;
+  max-width: 320px;
+  height: 240px;
+  border-radius: 12px;
+  background-color: #000;
+  border: 2px solid #4c8bf5;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
 #face-status {
   margin-top: 12px;
   font-size: 0.9rem;

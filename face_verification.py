@@ -19,12 +19,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Load the model and data once at startup
 MODEL_PATH = os.path.join(SCRIPT_DIR, "face_classifier_model.pkl")
-LABELS_PATH = os.path.join(SCRIPT_DIR, "data", "labels.xlsx")
 IMAGES_DIR = os.path.join(SCRIPT_DIR, "data", "images")
 
 # Global variables to store loaded model and data
 model = None
-label_map = None
+label_map = None  # mapping: register_number -> list of image filenames
 face_detector = None
 face_embeddings_cache = {}
 
@@ -252,7 +251,14 @@ def calculate_similarity(features1, features2):
     return float(combined_similarity)
 
 def load_model_and_data():
-    """Load the face classifier model and label mapping."""
+    """Load the face classifier model (if available) and build label mapping from image filenames.
+
+    Expected dataset structure:
+    - Directory: data/images
+    - Each student's image files are named using their registration number,
+      e.g. "22CS001.jpg", "22CS001_1.png", "22CS001_profile.jpeg"
+      The register number is taken as the filename stem up to the first underscore.
+    """
     global model, label_map
     
     if model is None:
@@ -267,17 +273,28 @@ def load_model_and_data():
             model = None
     
     if label_map is None:
-        print("Loading labels...", file=sys.stderr)
-        df = pd.read_excel(LABELS_PATH)
-        # Create mapping from registration number to image filenames
+        print("Building label map from image filenames...", file=sys.stderr)
         label_map = {}
-        for _, row in df.iterrows():
-            regno = str(row['regno']).strip()
-            filename = str(row['filename']).strip()
-            if regno not in label_map:
-                label_map[regno] = []
-            label_map[regno].append(filename)
-        print(f"Loaded {len(label_map)} registration numbers.", file=sys.stderr)
+
+        if not os.path.isdir(IMAGES_DIR):
+            print(f"Images directory not found at {IMAGES_DIR}", file=sys.stderr)
+        else:
+            for fname in os.listdir(IMAGES_DIR):
+                # Only consider common image extensions
+                if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
+                    continue
+
+                stem = os.path.splitext(fname)[0]
+                # Treat the part before the first underscore as the registration number
+                regno = stem.split("_")[0].strip()
+                if not regno:
+                    continue
+
+                if regno not in label_map:
+                    label_map[regno] = []
+                label_map[regno].append(fname)
+
+        print(f"Loaded {len(label_map)} registration numbers from images.", file=sys.stderr)
     
     # Load face detector
     load_face_detector()
