@@ -49,7 +49,7 @@ app.post("/verify-face", async (req, res) => {
         const scriptPath = path.join(__dirname, "face_verification.py");
         const command = `python3 "${scriptPath}" "${escapedRegno}" "${escapedImage}"`;
         
-        const { stdout, stderr } = await execAsync(command);
+        const { stdout, stderr } = await execAsync(command, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
         
         if (stderr && !stderr.includes("Loading")) {
             console.error("Python script error:", stderr);
@@ -67,7 +67,9 @@ app.post("/verify-face", async (req, res) => {
         res.status(500).json({ 
             success: false, 
             verified: false,
-            message: "Face verification failed. Please try again." 
+            message: error.killed
+                ? "Face verification timed out. Please try again with a clear, well-lit face image."
+                : "Face verification failed. Please try again." 
         });
     }
 });
@@ -87,7 +89,7 @@ app.post("/register", async (req, res) => {
             const scriptPath = path.join(__dirname, "face_verification.py");
             const command = `python3 "${scriptPath}" "${escapedRegno}" "${escapedImage}"`;
             
-            const { stdout, stderr } = await execAsync(command);
+            const { stdout, stderr } = await execAsync(command, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
             
             if (stderr && !stderr.includes("Loading")) {
                 console.error("Python script error:", stderr);
@@ -107,7 +109,9 @@ app.post("/register", async (req, res) => {
             console.error("Face verification error:", error);
             return res.status(500).json({ 
                 success: false, 
-                message: "Face verification failed. Please try again." 
+                message: error.killed
+                    ? "Face verification timed out. Please try again with a clear, well-lit face image."
+                    : "Face verification failed. Please try again." 
             });
         }
     }

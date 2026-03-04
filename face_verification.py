@@ -396,30 +396,28 @@ def verify_face(register_number, base64_image):
     avg_features = np.mean(all_ref_features, axis=0)
     cache_embeddings(register_number, avg_features)
 
-    # Compute the closest other registration profile and enforce a margin.
+    # Compute closest "other" profile only from already-cached embeddings.
+    # This keeps request latency bounded and avoids full-dataset rescans per request.
     best_other_similarity = 0.0
-    for other_regno, other_paths in label_map.items():
+    cached_other_count = 0
+    max_cached_others_to_check = 200
+    for other_regno, _ in label_map.items():
         if other_regno == register_number:
             continue
 
         other_embedding = get_cached_embeddings(other_regno)
         if other_embedding is None:
-            other_features = []
-            for other_path in other_paths:
-                if os.path.exists(other_path):
-                    feat = extract_face_features(other_path)
-                    if feat is not None:
-                        other_features.append(feat)
-            if other_features:
-                other_embedding = np.mean(other_features, axis=0)
-                cache_embeddings(other_regno, other_embedding)
+            continue
 
-        if other_embedding is not None:
-            other_similarity = calculate_similarity(captured_features, other_embedding)
-            best_other_similarity = max(best_other_similarity, other_similarity)
+        other_similarity = calculate_similarity(captured_features, other_embedding)
+        best_other_similarity = max(best_other_similarity, other_similarity)
+        cached_other_count += 1
+        if cached_other_count >= max_cached_others_to_check:
+            break
 
     threshold = 0.72
-    margin_threshold = 0.03
+    # If there are no cached "other" profiles yet, rely on absolute threshold only.
+    margin_threshold = 0.03 if cached_other_count > 0 else 0.0
     similarity_margin = best_similarity - best_other_similarity
     verified = (best_similarity >= threshold) and (similarity_margin >= margin_threshold)
     
