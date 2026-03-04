@@ -90,20 +90,17 @@ def detect_face_haar(image):
     return [(x, y, w, h) for (x, y, w, h) in faces]
 
 def detect_and_extract_face(image):
-    """Detect face in image and extract face region."""
+    """Detect face in image and extract face region.
+
+    Returns None when a face cannot be detected reliably.
+    """
     global face_detector
     
     if face_detector is None:
         load_face_detector()
     
     if face_detector is None:
-        # If no detector available, return center crop
-        h, w = image.shape[:2]
-        size = min(h, w)
-        x = (w - size) // 2
-        y = (h - size) // 2
-        face_roi = image[y:y+size, x:x+size]
-        return cv2.resize(face_roi, (224, 224))
+        return None
     
     # Try DNN detector first
     if hasattr(face_detector, 'setInput'):
@@ -112,17 +109,17 @@ def detect_and_extract_face(image):
         faces = detect_face_haar(image)
     
     if len(faces) == 0:
-        # No face detected, return center crop
-        h, w = image.shape[:2]
-        size = min(h, w)
-        x = (w - size) // 2
-        y = (h - size) // 2
-        face_roi = image[y:y+size, x:x+size]
-        return cv2.resize(face_roi, (224, 224))
+        return None
     
     # Use the largest face detected
     largest_face = max(faces, key=lambda f: f[2] * f[3])
     x, y, w, h = largest_face
+
+    # Reject extremely small detections to reduce false accepts.
+    image_area = image.shape[0] * image.shape[1]
+    face_area = max(w, 0) * max(h, 0)
+    if image_area <= 0 or (face_area / image_area) < 0.02:
+        return None
     
     # Extract face region with some padding
     padding = 20
@@ -142,6 +139,8 @@ def extract_face_features_improved(image):
     """Extract improved face features using multiple techniques."""
     # Detect and extract face
     face_roi = detect_and_extract_face(image)
+    if face_roi is None:
+        return None
     
     # Convert to grayscale for some features
     gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY) if len(face_roi.shape) == 3 else face_roi
@@ -374,39 +373,68 @@ def verify_face(register_number, base64_image):
     # Get reference images for this registration number
     reference_filenames = label_map[register_number]
     
-    # Check cache first
-    cached_embeddings = get_cached_embeddings(register_number)
-    if cached_embeddings is not None:
-        best_similarity = calculate_similarity(captured_features, cached_embeddings)
-    else:
-        # Compare with reference images
-        best_similarity = 0
-        all_ref_features = []
-        
-        for image_path in reference_filenames:
-            if os.path.exists(image_path):
-                ref_features = extract_face_features(image_path)
-                if ref_features is not None:
-                    all_ref_features.append(ref_features)
-                    similarity = calculate_similarity(captured_features, ref_features)
-                    best_similarity = max(best_similarity, similarity)
-        
-        # Cache average embeddings for future use
-        if all_ref_features:
-            avg_features = np.mean(all_ref_features, axis=0)
-            cache_embeddings(register_number, avg_features)
+    # Compare with reference images
+    best_similarity = 0.0
+    all_ref_features = []
     
-    # Adaptive threshold based on feature quality
-    # Lower threshold for better face recognition
-    threshold = 0.5
-    
-    verified = best_similarity >= threshold
+    for image_path in reference_filenames:
+        if os.path.exists(image_path):
+            ref_features = extract_face_features(image_path)
+            if ref_features is not None:
+                all_ref_features.append(ref_features)
+                similarity = calculate_similarity(captured_features, ref_features)
+                best_similarity = max(best_similarity, similarity)
+
+    if not all_ref_features:
+        return {
+            'verified': False,
+            'message': f'No valid face reference images found for {register_number}',
+            'confidence': 0.0
+        }
+
+    # Cache average embedding for claimed registration number.
+    avg_features = np.mean(all_ref_features, axis=0)
+    cache_embeddings(register_number, avg_features)
+
+    # Compute the closest other registration profile and enforce a margin.
+    best_other_similarity = 0.0
+    for other_regno, other_paths in label_map.items():
+        if other_regno == register_number:
+            continue
+
+        other_embedding = get_cached_embeddings(other_regno)
+        if other_embedding is None:
+            other_features = []
+            for other_path in other_paths:
+                if os.path.exists(other_path):
+                    feat = extract_face_features(other_path)
+                    if feat is not None:
+                        other_features.append(feat)
+            if other_features:
+                other_embedding = np.mean(other_features, axis=0)
+                cache_embeddings(other_regno, other_embedding)
+
+        if other_embedding is not None:
+            other_similarity = calculate_similarity(captured_features, other_embedding)
+            best_other_similarity = max(best_other_similarity, other_similarity)
+
+    threshold = 0.72
+    margin_threshold = 0.03
+    similarity_margin = best_similarity - best_other_similarity
+    verified = (best_similarity >= threshold) and (similarity_margin >= margin_threshold)
     
     return {
         'verified': verified,
-        'message': 'Face matches registration number' if verified else f'Face does not match registration number (similarity: {best_similarity:.3f}, threshold: {threshold})',
+        'message': (
+            'Face matches registration number'
+            if verified else
+            f'Face does not match registration number (similarity: {best_similarity:.3f}, '
+            f'threshold: {threshold}, margin: {similarity_margin:.3f}, required_margin: {margin_threshold})'
+        ),
         'confidence': float(best_similarity),
-        'threshold': threshold
+        'threshold': threshold,
+        'best_other_similarity': float(best_other_similarity),
+        'margin': float(similarity_margin)
     }
 
 if __name__ == "__main__":
