@@ -18,7 +18,8 @@ from deepface import DeepFace
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_NAME = "Facenet"
 DETECTOR_BACKEND = "retinaface"
-SIMILARITY_THRESHOLD = 0.6
+SIMILARITY_THRESHOLD = 0.65
+MARGIN_THRESHOLD = 0.12
 
 # Prefer requested dataset layout.
 PRIMARY_DATASET_DIR = os.path.join(SCRIPT_DIR, "dataset")
@@ -47,7 +48,7 @@ def l2_normalize(vec: np.ndarray) -> np.ndarray:
 
 
 def represent_face(img_path: str) -> Optional[np.ndarray]:
-    """Generate FaceNet embedding for a single image path."""
+    """Generate FaceNet embedding for an image with strict single-face validation."""
     try:
         reps = DeepFace.represent(
             img_path=img_path,
@@ -57,10 +58,14 @@ def represent_face(img_path: str) -> Optional[np.ndarray]:
             align=True,
         )
         if not reps:
+            print(f"Embedding skipped (no faces): {img_path}", file=sys.stderr)
+            return None
+        if len(reps) != 1:
+            print(f"Embedding skipped (expected 1 face, found {len(reps)}): {img_path}", file=sys.stderr)
             return None
         return l2_normalize(np.array(reps[0]["embedding"], dtype=np.float32))
     except Exception as exc:
-        print(f"Embedding failed for {img_path}: {exc}", file=sys.stderr)
+        print(f"Embedding failed (detection/alignment error) for {img_path}: {exc}", file=sys.stderr)
         return None
 
 
@@ -94,8 +99,14 @@ def get_active_dataset_dirs() -> List[str]:
     return [d for d in FALLBACK_DATASET_DIRS if os.path.isdir(d)]
 
 
-def discover_dataset_images() -> List[str]:
-    images: List[str] = []
+def extract_regno_from_filename(path: str) -> str:
+    """Extract registration number from filename (prefix before underscore)."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return normalize_regno(stem.split("_")[0])
+
+
+def discover_dataset_images_by_regno() -> Dict[str, List[str]]:
+    grouped_paths: Dict[str, List[str]] = {}
     seen = set()
 
     for dataset_dir in get_active_dataset_dirs():
@@ -107,9 +118,13 @@ def discover_dataset_images() -> List[str]:
                 if full_path in seen:
                     continue
                 seen.add(full_path)
-                images.append(full_path)
 
-    return images
+                regno = extract_regno_from_filename(full_path)
+                if not regno:
+                    continue
+                grouped_paths.setdefault(regno, []).append(full_path)
+
+    return grouped_paths
 
 
 def initialize_embeddings() -> Dict[str, List[np.ndarray]]:
@@ -120,8 +135,9 @@ def initialize_embeddings() -> Dict[str, List[np.ndarray]]:
         return embedding_store
 
     active_dirs = get_active_dataset_dirs()
-    dataset_images = discover_dataset_images()
-    if not dataset_images:
+    dataset_images_by_regno = discover_dataset_images_by_regno()
+    total_images = sum(len(paths) for paths in dataset_images_by_regno.values())
+    if total_images == 0:
         print(
             f"No dataset images found in: {', '.join(active_dirs) if active_dirs else '[]'}",
             file=sys.stderr,
@@ -130,23 +146,34 @@ def initialize_embeddings() -> Dict[str, List[np.ndarray]]:
         return embedding_store
 
     grouped: Dict[str, List[np.ndarray]] = {}
+    embedding_counts_all: Dict[str, int] = {}
     print(
-        f"Initializing embeddings from {len(dataset_images)} images in {active_dirs}...",
+        f"Initializing embeddings from {total_images} images in {active_dirs}...",
         file=sys.stderr
     )
 
-    for img_path in dataset_images:
-        regno = normalize_regno(os.path.splitext(os.path.basename(img_path))[0])
-        if not regno:
+    for regno, image_paths in dataset_images_by_regno.items():
+        embeddings_for_regno: List[np.ndarray] = []
+        for img_path in image_paths:
+            emb = represent_face(img_path)
+            if emb is None:
+                # Invalid images (no face or multiple faces) are skipped by design.
+                continue
+            embeddings_for_regno.append(emb)
+
+        if not embeddings_for_regno:
+            embedding_counts_all[regno] = 0
+            print(f"Warning: no valid embeddings for registration {regno}; skipping.", file=sys.stderr)
             continue
 
-        emb = represent_face(img_path)
-        if emb is None:
-            continue
-
-        grouped.setdefault(regno, []).append(emb)
+        grouped[regno] = embeddings_for_regno
+        embedding_counts_all[regno] = len(embeddings_for_regno)
 
     embedding_store = {regno: embs for regno, embs in grouped.items() if embs}
+    print(
+        f"Embedding counts by registration: {json.dumps(embedding_counts_all, sort_keys=True)}",
+        file=sys.stderr
+    )
 
     total_embeddings = sum(len(v) for v in embedding_store.values())
     print(
@@ -207,11 +234,25 @@ def verify_face(register_number: str, base64_image: str) -> dict:
     second_best_score = ranked[1][1] if len(ranked) > 1 else -1.0
     margin = best_score - second_best_score
 
-    margin_threshold = 0.08
     verified = (
         claimed_similarity >= SIMILARITY_THRESHOLD
         and best_regno == regno
-        and margin >= margin_threshold
+        and margin >= MARGIN_THRESHOLD
+    )
+
+    print(
+        "Verification diagnostics: "
+        + json.dumps(
+            {
+                "entered_registration_number": regno,
+                "best_match_regno": best_regno,
+                "claimed_similarity": float(claimed_similarity),
+                "best_match_confidence": float(best_score),
+                "second_best_confidence": float(second_best_score),
+                "margin": float(margin),
+            }
+        ),
+        file=sys.stderr,
     )
 
     return {
@@ -227,7 +268,7 @@ def verify_face(register_number: str, base64_image: str) -> dict:
         "best_match_confidence": float(best_score),
         "second_best_confidence": float(second_best_score),
         "margin": float(margin),
-        "margin_threshold": margin_threshold,
+        "margin_threshold": MARGIN_THRESHOLD,
     }
 
 
