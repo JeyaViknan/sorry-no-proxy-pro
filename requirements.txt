@@ -1,4 +1,5 @@
-pandas>=1.5.0
 numpy>=1.23.0
 opencv-python>=4.6.0
 openpyxl>=3.0.0
+deepface>=0.0.93
+retina-face>=0.0.17

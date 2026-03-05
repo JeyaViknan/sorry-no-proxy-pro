@@ -1,409 +1,235 @@
 #!/usr/bin/env python3
 """
-Face Verification Service
-Uses face detection and improved feature extraction to verify if a captured face matches a registration number.
+Face Verification Service (DeepFace + FaceNet)
+Loads dataset embeddings at startup and verifies a captured face against
+a registration number using cosine similarity.
 """
 
-import numpy as np
-import cv2
 import base64
-import sys
 import json
 import os
-from pathlib import Path
+import sys
+import tempfile
+from typing import Dict, List, Optional
 
-# Get script directory for relative paths
+import numpy as np
+from deepface import DeepFace
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_NAME = "Facenet"
+DETECTOR_BACKEND = "retinaface"
+SIMILARITY_THRESHOLD = 0.6
 
-# Data paths
-PRIMARY_IMAGES_DIR = os.path.join(SCRIPT_DIR, "data", "images")
-FALLBACK_IMAGES_DIR = os.path.join(SCRIPT_DIR, "data")
+# Prefer requested dataset layout, keep fallbacks for compatibility.
+DATASET_DIRS = [
+    os.path.join(SCRIPT_DIR, "dataset"),
+    os.path.join(SCRIPT_DIR, "data", "images"),
+    os.path.join(SCRIPT_DIR, "data"),
+]
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
-# Global variables to store loaded model and data
-label_map = None  # mapping: register_number -> list of image filenames
-face_detector = None
-face_embeddings_cache = {}
+# In-memory store: {registration_number: embedding_vector}
+embedding_store: Dict[str, np.ndarray] = {}
 
-def load_face_detector():
-    """Load OpenCV DNN face detector."""
-    global face_detector
-    
-    if face_detector is None:
-        try:
-            # Try to load OpenCV DNN face detector
-            # Using OpenCV's built-in DNN face detector (more reliable than Haar cascades)
-            prototxt_path = os.path.join(SCRIPT_DIR, "deploy.prototxt")
-            model_path = os.path.join(SCRIPT_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
-            
-            if os.path.exists(prototxt_path) and os.path.exists(model_path):
-                face_detector = cv2.dnn.readNetFromCaffe(prototxt_path, model_path)
-                print("Loaded OpenCV DNN face detector.", file=sys.stderr)
-            else:
-                # Fallback to Haar Cascade
-                cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-                face_detector = cv2.CascadeClassifier(cascade_path)
-                if face_detector.empty():
-                    print("Warning: Could not load face detector.", file=sys.stderr)
-                    face_detector = None
-                else:
-                    print("Loaded Haar Cascade face detector.", file=sys.stderr)
-        except Exception as e:
-            print(f"Error loading face detector: {e}", file=sys.stderr)
-            # Fallback to Haar Cascade
-            try:
-                cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-                face_detector = cv2.CascadeClassifier(cascade_path)
-                if not face_detector.empty():
-                    print("Loaded Haar Cascade face detector (fallback).", file=sys.stderr)
-                else:
-                    face_detector = None
-            except:
-                face_detector = None
-    
-    return face_detector
 
-def detect_face_opencv_dnn(image):
-    """Detect face using OpenCV DNN."""
-    h, w = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 1.0, (300, 300), [104, 117, 123])
-    face_detector.setInput(blob)
-    detections = face_detector.forward()
-    
-    faces = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.5:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            x, y, x2, y2 = box.astype(int)
-            faces.append((x, y, x2 - x, y2 - y))
-    
-    return faces
-
-def detect_face_haar(image):
-    """Detect face using Haar Cascade."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-    faces = face_detector.detectMultiScale(gray, 1.3, 5)
-    return [(x, y, w, h) for (x, y, w, h) in faces]
-
-def detect_and_extract_face(image):
-    """Detect face in image and extract face region.
-
-    Returns None when a face cannot be detected reliably.
-    """
-    global face_detector
-    
-    if face_detector is None:
-        load_face_detector()
-    
-    if face_detector is None:
-        return None
-    
-    # Try DNN detector first
-    if hasattr(face_detector, 'setInput'):
-        faces = detect_face_opencv_dnn(image)
-    else:
-        faces = detect_face_haar(image)
-    
-    if len(faces) == 0:
-        return None
-    
-    # Use the largest face detected
-    largest_face = max(faces, key=lambda f: f[2] * f[3])
-    x, y, w, h = largest_face
-
-    # Reject extremely small detections to reduce false accepts.
-    image_area = image.shape[0] * image.shape[1]
-    face_area = max(w, 0) * max(h, 0)
-    if image_area <= 0 or (face_area / image_area) < 0.02:
-        return None
-    
-    # Extract face region with some padding
-    padding = 20
-    x = max(0, x - padding)
-    y = max(0, y - padding)
-    w = min(image.shape[1] - x, w + 2 * padding)
-    h = min(image.shape[0] - y, h + 2 * padding)
-    
-    face_roi = image[y:y+h, x:x+w]
-    
-    # Resize to standard size
-    face_resized = cv2.resize(face_roi, (224, 224))
-    
-    return face_resized
-
-def extract_face_features_improved(image):
-    """Extract improved face features using multiple techniques."""
-    # Detect and extract face
-    face_roi = detect_and_extract_face(image)
-    if face_roi is None:
-        return None
-    
-    # Convert to grayscale for some features
-    gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY) if len(face_roi.shape) == 3 else face_roi
-    
-    features = []
-    
-    # 1. Histogram of Oriented Gradients (HOG) features
-    try:
-        # Calculate HOG features
-        win_size = (224, 224)
-        block_size = (16, 16)
-        block_stride = (8, 8)
-        cell_size = (8, 8)
-        nbins = 9
-        
-        hog = cv2.HOGDescriptor(win_size, block_size, block_stride, cell_size, nbins)
-        hog_features = hog.compute(gray)
-        features.extend(hog_features.flatten())
-    except:
-        pass
-    
-    # 2. Color histogram features (for RGB images)
-    if len(face_roi.shape) == 3:
-        for channel in range(3):
-            hist = cv2.calcHist([face_roi], [channel], None, [32], [0, 256])
-            features.extend(hist.flatten())
-    
-    # 3. Normalized pixel values (smaller, focused region)
-    face_normalized = face_roi.astype(np.float32) / 255.0
-    # Use a smaller representation
-    face_small = cv2.resize(face_normalized, (64, 64))
-    features.extend(face_small.flatten())
-    
-    return np.array(features, dtype=np.float32)
-
-def extract_face_features(image_path):
-    """Extract face features from an image file."""
-    try:
-        img = cv2.imread(image_path)
-        if img is None:
-            return None
-        return extract_face_features_improved(img)
-    except Exception as e:
-        print(f"Error extracting features from {image_path}: {e}", file=sys.stderr)
-        return None
-
-def extract_face_from_base64(base64_string):
-    """Extract face features from a base64 encoded image."""
-    try:
-        # Decode base64
-        image_data = base64.b64decode(base64_string.split(',')[1] if ',' in base64_string else base64_string)
-        nparr = np.frombuffer(image_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img is None:
-            return None
-        
-        return extract_face_features_improved(img)
-    except Exception as e:
-        print(f"Error processing base64 image: {e}", file=sys.stderr)
-        return None
-
-def calculate_similarity(features1, features2):
-    """Calculate similarity between two feature vectors."""
-    if features1 is None or features2 is None:
-        return 0.0
-    
-    # Normalize features
-    features1_norm = features1 / (np.linalg.norm(features1) + 1e-10)
-    features2_norm = features2 / (np.linalg.norm(features2) + 1e-10)
-    
-    # Cosine similarity
-    cosine_sim = np.dot(features1_norm, features2_norm)
-    
-    # Also calculate Euclidean distance (inverted and normalized)
-    euclidean_dist = np.linalg.norm(features1 - features2)
-    # Normalize by max possible distance (approximate)
-    max_dist = np.linalg.norm(features1) + np.linalg.norm(features2)
-    euclidean_sim = 1.0 - min(euclidean_dist / (max_dist + 1e-10), 1.0)
-    
-    # Combine both similarities (weighted average)
-    combined_similarity = 0.7 * cosine_sim + 0.3 * euclidean_sim
-    
-    return float(combined_similarity)
-
-def normalize_regno(value):
-    """Normalize registration number for consistent lookups."""
+def normalize_regno(value: str) -> str:
     return str(value).strip().upper()
 
 
-def load_model_and_data():
-    """Load the face classifier model (if available) and build label mapping from image filenames.
+def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    denom = (np.linalg.norm(vec1) * np.linalg.norm(vec2)) + 1e-10
+    return float(np.dot(vec1, vec2) / denom)
 
-    Expected dataset structure:
-    - Directory: data/images
-    - Each student's image files are named using their registration number,
-      e.g. "22CS001.jpg", "22CS001_1.png", "22CS001_profile.jpeg"
-      The register number is taken as the filename stem up to the first underscore.
-    """
-    global label_map
-    
-    if label_map is None:
-        image_roots = []
-        if os.path.isdir(PRIMARY_IMAGES_DIR):
-            image_roots.append(PRIMARY_IMAGES_DIR)
-        if os.path.isdir(FALLBACK_IMAGES_DIR):
-            image_roots.append(FALLBACK_IMAGES_DIR)
 
-        if PRIMARY_IMAGES_DIR in image_roots and FALLBACK_IMAGES_DIR in image_roots:
-            print(
-                f"Building label map from image filenames in {PRIMARY_IMAGES_DIR} and {FALLBACK_IMAGES_DIR}...",
-                file=sys.stderr
-            )
-        elif image_roots:
-            print(f"Building label map from image filenames in {image_roots[0]}...", file=sys.stderr)
-        else:
-            print(f"Images directory not found at {PRIMARY_IMAGES_DIR} or {FALLBACK_IMAGES_DIR}", file=sys.stderr)
+def represent_face(img_path: str) -> Optional[np.ndarray]:
+    """Generate FaceNet embedding for a single image path."""
+    try:
+        reps = DeepFace.represent(
+            img_path=img_path,
+            model_name=MODEL_NAME,
+            detector_backend=DETECTOR_BACKEND,
+            enforce_detection=True,
+            align=True,
+        )
+        if not reps:
+            return None
+        return np.array(reps[0]["embedding"], dtype=np.float32)
+    except Exception as exc:
+        print(f"Embedding failed for {img_path}: {exc}", file=sys.stderr)
+        return None
 
-        label_map = {}
-        seen_files = set()
 
-        for image_root in image_roots:
-            for root, _, files in os.walk(image_root):
-                for fname in files:
-                    # Only consider common image extensions
-                    if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
-                        continue
+def extract_embedding_from_base64(base64_image: str) -> Optional[np.ndarray]:
+    """Decode base64 image and compute FaceNet embedding."""
+    temp_path = None
+    try:
+        payload = base64_image.split(",", 1)[1] if "," in base64_image else base64_image
+        image_bytes = base64.b64decode(payload)
 
-                    stem = os.path.splitext(fname)[0]
-                    # Treat the part before the first underscore as the registration number
-                    regno = normalize_regno(stem.split("_")[0])
-                    if not regno:
-                        continue
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(image_bytes)
+            temp_path = tmp.name
 
-                    if regno not in label_map:
-                        label_map[regno] = []
+        return represent_face(temp_path)
+    except Exception as exc:
+        print(f"Failed to process captured image: {exc}", file=sys.stderr)
+        return None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
-                    image_path = os.path.join(root, fname)
-                    if image_path in seen_files:
-                        continue
-                    seen_files.add(image_path)
-                    label_map[regno].append(image_path)
 
-        print(f"Loaded {len(label_map)} registration numbers from images.", file=sys.stderr)
-        if label_map:
-            # Log a few sample keys for debugging
-            sample_keys = list(label_map.keys())[:5]
-            print(f"Sample registration numbers found: {sample_keys}", file=sys.stderr)
-    
-    # Load face detector
-    load_face_detector()
-    
-    return label_map
+def discover_dataset_images() -> List[str]:
+    images: List[str] = []
+    seen = set()
 
-def get_cached_embeddings(regno):
-    """Get cached face embeddings for a registration number."""
-    global face_embeddings_cache
-    
-    if regno in face_embeddings_cache:
-        return face_embeddings_cache[regno]
-    
-    return None
+    for dataset_dir in DATASET_DIRS:
+        if not os.path.isdir(dataset_dir):
+            continue
+        for root, _, files in os.walk(dataset_dir):
+            for fname in files:
+                if not fname.lower().endswith(IMAGE_EXTENSIONS):
+                    continue
+                full_path = os.path.join(root, fname)
+                if full_path in seen:
+                    continue
+                seen.add(full_path)
+                images.append(full_path)
 
-def cache_embeddings(regno, embeddings):
-    """Cache face embeddings for a registration number."""
-    global face_embeddings_cache
-    face_embeddings_cache[regno] = embeddings
+    return images
 
-def verify_face(register_number, base64_image):
-    """Verify if the captured face matches the given registration number."""
-    global label_map
-    
-    # Load model and data if not already loaded
-    if label_map is None:
-        load_model_and_data()
-    
-    # Check if registration number exists in database
-    register_number = normalize_regno(register_number)
-    if register_number not in label_map:
-        return {
-            'verified': False,
-            'message': f'Registration number {register_number} not found in database',
-            'confidence': 0.0
-        }
-    
-    # Extract features from captured image
-    captured_features = extract_face_from_base64(base64_image)
-    if captured_features is None:
-        return {
-            'verified': False,
-            'message': 'Failed to process captured image or no face detected',
-            'confidence': 0.0
-        }
-    
-    # Get reference images for this registration number
-    reference_filenames = label_map[register_number]
-    
-    # Compare with reference images
-    best_similarity = 0.0
-    all_ref_features = []
-    
-    for image_path in reference_filenames:
-        if os.path.exists(image_path):
-            ref_features = extract_face_features(image_path)
-            if ref_features is not None:
-                all_ref_features.append(ref_features)
-                similarity = calculate_similarity(captured_features, ref_features)
-                best_similarity = max(best_similarity, similarity)
 
-    if not all_ref_features:
-        return {
-            'verified': False,
-            'message': f'No valid face reference images found for {register_number}',
-            'confidence': 0.0
-        }
+def initialize_embeddings() -> Dict[str, np.ndarray]:
+    """Load all dataset images and build in-memory registration->embedding map."""
+    global embedding_store
 
-    # Cache average embedding for claimed registration number.
-    avg_features = np.mean(all_ref_features, axis=0)
-    cache_embeddings(register_number, avg_features)
+    if embedding_store:
+        return embedding_store
 
-    # Compute closest "other" profile only from already-cached embeddings.
-    # This keeps request latency bounded and avoids full-dataset rescans per request.
-    best_other_similarity = 0.0
-    cached_other_count = 0
-    max_cached_others_to_check = 200
-    for other_regno, _ in label_map.items():
-        if other_regno == register_number:
+    dataset_images = discover_dataset_images()
+    if not dataset_images:
+        print(
+            f"No dataset images found in: {', '.join(DATASET_DIRS)}",
+            file=sys.stderr,
+        )
+        embedding_store = {}
+        return embedding_store
+
+    grouped: Dict[str, List[np.ndarray]] = {}
+    print(f"Initializing embeddings from {len(dataset_images)} images...", file=sys.stderr)
+
+    for img_path in dataset_images:
+        regno = normalize_regno(os.path.splitext(os.path.basename(img_path))[0])
+        if not regno:
             continue
 
-        other_embedding = get_cached_embeddings(other_regno)
-        if other_embedding is None:
+        emb = represent_face(img_path)
+        if emb is None:
             continue
 
-        other_similarity = calculate_similarity(captured_features, other_embedding)
-        best_other_similarity = max(best_other_similarity, other_similarity)
-        cached_other_count += 1
-        if cached_other_count >= max_cached_others_to_check:
-            break
+        grouped.setdefault(regno, []).append(emb)
 
-    threshold = 0.72
-    # If there are no cached "other" profiles yet, rely on absolute threshold only.
-    margin_threshold = 0.03 if cached_other_count > 0 else 0.0
-    similarity_margin = best_similarity - best_other_similarity
-    verified = (best_similarity >= threshold) and (similarity_margin >= margin_threshold)
-    
-    return {
-        'verified': verified,
-        'message': (
-            'Face matches registration number'
-            if verified else
-            f'Face does not match registration number (similarity: {best_similarity:.3f}, '
-            f'threshold: {threshold}, margin: {similarity_margin:.3f}, required_margin: {margin_threshold})'
-        ),
-        'confidence': float(best_similarity),
-        'threshold': threshold,
-        'best_other_similarity': float(best_other_similarity),
-        'margin': float(similarity_margin)
+    # If multiple images exist for same registration number, average their embeddings.
+    embedding_store = {
+        regno: np.mean(np.stack(embs, axis=0), axis=0).astype(np.float32)
+        for regno, embs in grouped.items()
+        if embs
     }
 
-if __name__ == "__main__":
-    # Command line interface for testing
+    print(f"Initialized embeddings for {len(embedding_store)} registration numbers.", file=sys.stderr)
+    return embedding_store
+
+
+def verify_face(register_number: str, base64_image: str) -> dict:
+    store = initialize_embeddings()
+    regno = normalize_regno(register_number)
+
+    if regno not in store:
+        return {
+            "verified": False,
+            "message": f"Registration number {regno} not found in database",
+            "confidence": 0.0,
+        }
+
+    captured_embedding = extract_embedding_from_base64(base64_image)
+    if captured_embedding is None:
+        return {
+            "verified": False,
+            "message": "Failed to process captured image or no face detected",
+            "confidence": 0.0,
+        }
+
+    similarity = cosine_similarity(captured_embedding, store[regno])
+    verified = similarity >= SIMILARITY_THRESHOLD
+
+    return {
+        "verified": verified,
+        "message": (
+            "Face matches registration number"
+            if verified
+            else "Face does not match registration number"
+        ),
+        "confidence": float(similarity),
+        "threshold": SIMILARITY_THRESHOLD,
+    }
+
+
+def serve_forever() -> None:
+    """Persistent worker mode for fast repeated verification requests."""
+    initialize_embeddings()
+    print("Face verifier ready", file=sys.stderr)
+
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        req_id = None
+        try:
+            payload = json.loads(line)
+            req_id = payload.get("id")
+            reg = payload.get("registerNumber")
+            img = payload.get("faceImage")
+
+            if not reg or not img:
+                response = {
+                    "id": req_id,
+                    "verified": False,
+                    "message": "Missing register number or face image",
+                    "confidence": 0.0,
+                }
+            else:
+                result = verify_face(reg, img)
+                response = {"id": req_id, **result}
+        except Exception as exc:
+            response = {
+                "id": req_id,
+                "verified": False,
+                "message": f"Internal face verification error: {exc}",
+                "confidence": 0.0,
+            }
+
+        print(json.dumps(response), flush=True)
+
+
+def main() -> None:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--serve":
+        serve_forever()
+        return
+
     if len(sys.argv) < 3:
-        print(json.dumps({'error': 'Usage: python face_verification.py <register_number> <base64_image>'}))
+        print(json.dumps({"error": "Usage: python face_verification.py <register_number> <base64_image>"}))
         sys.exit(1)
-    
+
     register_number = sys.argv[1]
     base64_image = sys.argv[2]
-    
+
     result = verify_face(register_number, base64_image)
     print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

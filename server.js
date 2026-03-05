@@ -3,71 +3,161 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { google } = require("googleapis");
-const { exec } = require("child_process");
-const { promisify } = require("util");
+const { spawn } = require("child_process");
 const path = require("path");
-
-const execAsync = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-app.use(cors({ origin: "*" })); 
-app.use(bodyParser.json({ limit: "10mb" })); // Increase limit for base64 images
-
-// Serve static files (HTML, CSS, JS)
+app.use(cors({ origin: "*" }));
+app.use(bodyParser.json({ limit: "10mb" }));
 app.use(express.static(__dirname));
-
 
 const auth = new google.auth.GoogleAuth({
     credentials: {
         client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        private_key: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, '\n'),
+        private_key: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
     },
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// Face verification endpoint
+const verifierState = {
+    process: null,
+    buffer: "",
+    nextId: 1,
+    pending: new Map(),
+};
+
+function rejectAllPending(message) {
+    for (const { reject, timer } of verifierState.pending.values()) {
+        clearTimeout(timer);
+        reject(new Error(message));
+    }
+    verifierState.pending.clear();
+}
+
+function handleVerifierOutput(chunk) {
+    verifierState.buffer += chunk.toString();
+    const lines = verifierState.buffer.split("\n");
+    verifierState.buffer = lines.pop() || "";
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+            continue;
+        }
+
+        let payload;
+        try {
+            payload = JSON.parse(trimmed);
+        } catch (err) {
+            console.error("[face-verifier] non-json stdout:", trimmed);
+            continue;
+        }
+
+        const requestId = payload.id;
+        const pending = verifierState.pending.get(requestId);
+        if (!pending) {
+            continue;
+        }
+
+        clearTimeout(pending.timer);
+        verifierState.pending.delete(requestId);
+        pending.resolve(payload);
+    }
+}
+
+function startVerifierProcess() {
+    const scriptPath = path.join(__dirname, "face_verification.py");
+    const proc = spawn("python3", ["-u", scriptPath, "--serve"], {
+        cwd: __dirname,
+        stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    verifierState.process = proc;
+    verifierState.buffer = "";
+
+    proc.stdout.on("data", handleVerifierOutput);
+
+    proc.stderr.on("data", (chunk) => {
+        console.log(`[face-verifier] ${chunk.toString().trim()}`);
+    });
+
+    proc.on("error", (err) => {
+        console.error("[face-verifier] process error:", err);
+    });
+
+    proc.on("exit", (code, signal) => {
+        console.error(`[face-verifier] exited (code=${code}, signal=${signal})`);
+        verifierState.process = null;
+        rejectAllPending("Face verifier is unavailable");
+
+        // Auto-restart worker so service remains available.
+        setTimeout(() => {
+            startVerifierProcess();
+        }, 1000);
+    });
+}
+
+function verifyFaceWithWorker(registerNumber, faceImage) {
+    return new Promise((resolve, reject) => {
+        if (!verifierState.process || verifierState.process.killed) {
+            startVerifierProcess();
+        }
+
+        const requestId = verifierState.nextId++;
+        const timer = setTimeout(() => {
+            verifierState.pending.delete(requestId);
+            reject(new Error("Face verification request timed out"));
+        }, 10000);
+
+        verifierState.pending.set(requestId, { resolve, reject, timer });
+
+        try {
+            const payload = JSON.stringify({
+                id: requestId,
+                registerNumber,
+                faceImage,
+            });
+            verifierState.process.stdin.write(`${payload}\n`);
+        } catch (err) {
+            clearTimeout(timer);
+            verifierState.pending.delete(requestId);
+            reject(err);
+        }
+    });
+}
+
+// Start verifier worker on server start (preloads embeddings and model once).
+startVerifierProcess();
+
 app.post("/verify-face", async (req, res) => {
     const { registerNumber, faceImage } = req.body;
 
     if (!registerNumber || !faceImage) {
-        return res.status(400).json({ 
-            success: false, 
+        return res.status(400).json({
+            success: false,
             verified: false,
-            message: "Missing register number or face image" 
+            message: "Missing register number or face image",
         });
     }
 
     try {
-        // Escape the base64 image for command line
-        const escapedImage = faceImage.replace(/"/g, '\\"');
-        const escapedRegno = registerNumber.replace(/"/g, '\\"');
-        
-        // Call Python script for face verification
-        const scriptPath = path.join(__dirname, "face_verification.py");
-        const command = `python3 "${scriptPath}" "${escapedRegno}" "${escapedImage}"`;
-        
-        const { stdout, stderr } = await execAsync(command, { timeout: 45000, maxBuffer: 10 * 1024 * 1024 });
-        
-        if (stderr && !stderr.includes("Loading")) {
-            console.error("Python script error:", stderr);
-        }
-        
-        const result = JSON.parse(stdout);
+        const result = await verifyFaceWithWorker(registerNumber, faceImage);
         res.json({
             success: true,
-            verified: result.verified,
+            verified: !!result.verified,
             message: result.message,
-            confidence: result.confidence
+            confidence: result.confidence,
+            threshold: result.threshold,
         });
     } catch (error) {
         console.error("Face verification error:", error);
-        res.status(500).json({ 
-            success: false, 
+        res.status(500).json({
+            success: false,
             verified: false,
-            message: "Face verification failed. Please try again." 
+            message: "Face verification failed. Please try again.",
         });
     }
 });
@@ -79,42 +169,29 @@ app.post("/register", async (req, res) => {
         return res.status(400).json({ success: false, message: "Missing register number" });
     }
 
-    // Verify face if image is provided
+    // Optional: if caller includes a face image here, verify using the same worker.
     if (faceImage) {
         try {
-            const escapedImage = faceImage.replace(/"/g, '\\"');
-            const escapedRegno = registerNumber.replace(/"/g, '\\"');
-            const scriptPath = path.join(__dirname, "face_verification.py");
-            const command = `python3 "${scriptPath}" "${escapedRegno}" "${escapedImage}"`;
-            
-            const { stdout, stderr } = await execAsync(command, { timeout: 45000, maxBuffer: 10 * 1024 * 1024 });
-            
-            if (stderr && !stderr.includes("Loading")) {
-                console.error("Python script error:", stderr);
-            }
-            
-            const verificationResult = JSON.parse(stdout);
-            
+            const verificationResult = await verifyFaceWithWorker(registerNumber, faceImage);
             if (!verificationResult.verified) {
-                return res.status(400).json({ 
-                    success: false, 
+                return res.status(400).json({
+                    success: false,
                     message: verificationResult.message || "Face verification failed. Please ensure your face matches the registration number.",
                     verified: false,
-                    confidence: verificationResult.confidence
+                    confidence: verificationResult.confidence,
                 });
             }
         } catch (error) {
             console.error("Face verification error:", error);
-            return res.status(500).json({ 
-                success: false, 
-                message: "Face verification failed. Please try again." 
+            return res.status(500).json({
+                success: false,
+                message: "Face verification failed. Please try again.",
             });
         }
     }
 
-    // If face verification passed (or not required), proceed with registration
     const generatedCode = `CODE-${Math.floor(Math.random() * 10000)}`;
-    
+
     try {
         await sheets.spreadsheets.values.append({
             spreadsheetId: process.env.SHEET_ID,
