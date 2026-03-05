@@ -20,16 +20,17 @@ MODEL_NAME = "Facenet"
 DETECTOR_BACKEND = "retinaface"
 SIMILARITY_THRESHOLD = 0.6
 
-# Prefer requested dataset layout, keep fallbacks for compatibility.
-DATASET_DIRS = [
+# Prefer requested dataset layout.
+PRIMARY_DATASET_DIR = os.path.join(SCRIPT_DIR, "dataset")
+FALLBACK_DATASET_DIRS = [
     os.path.join(SCRIPT_DIR, "dataset"),
     os.path.join(SCRIPT_DIR, "data", "images"),
     os.path.join(SCRIPT_DIR, "data"),
 ]
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
-# In-memory store: {registration_number: embedding_vector}
-embedding_store: Dict[str, np.ndarray] = {}
+# In-memory store: {registration_number: [normalized embedding vectors]}
+embedding_store: Dict[str, List[np.ndarray]] = {}
 
 
 def normalize_regno(value: str) -> str:
@@ -39,6 +40,10 @@ def normalize_regno(value: str) -> str:
 def cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
     denom = (np.linalg.norm(vec1) * np.linalg.norm(vec2)) + 1e-10
     return float(np.dot(vec1, vec2) / denom)
+
+def l2_normalize(vec: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vec) + 1e-10
+    return (vec / norm).astype(np.float32)
 
 
 def represent_face(img_path: str) -> Optional[np.ndarray]:
@@ -53,7 +58,7 @@ def represent_face(img_path: str) -> Optional[np.ndarray]:
         )
         if not reps:
             return None
-        return np.array(reps[0]["embedding"], dtype=np.float32)
+        return l2_normalize(np.array(reps[0]["embedding"], dtype=np.float32))
     except Exception as exc:
         print(f"Embedding failed for {img_path}: {exc}", file=sys.stderr)
         return None
@@ -82,13 +87,18 @@ def extract_embedding_from_base64(base64_image: str) -> Optional[np.ndarray]:
                 pass
 
 
+def get_active_dataset_dirs() -> List[str]:
+    """Use only dataset/ when present; otherwise fallback to legacy folders."""
+    if os.path.isdir(PRIMARY_DATASET_DIR):
+        return [PRIMARY_DATASET_DIR]
+    return [d for d in FALLBACK_DATASET_DIRS if os.path.isdir(d)]
+
+
 def discover_dataset_images() -> List[str]:
     images: List[str] = []
     seen = set()
 
-    for dataset_dir in DATASET_DIRS:
-        if not os.path.isdir(dataset_dir):
-            continue
+    for dataset_dir in get_active_dataset_dirs():
         for root, _, files in os.walk(dataset_dir):
             for fname in files:
                 if not fname.lower().endswith(IMAGE_EXTENSIONS):
@@ -102,24 +112,28 @@ def discover_dataset_images() -> List[str]:
     return images
 
 
-def initialize_embeddings() -> Dict[str, np.ndarray]:
-    """Load all dataset images and build in-memory registration->embedding map."""
+def initialize_embeddings() -> Dict[str, List[np.ndarray]]:
+    """Load all dataset images and build in-memory embedding store."""
     global embedding_store
 
     if embedding_store:
         return embedding_store
 
+    active_dirs = get_active_dataset_dirs()
     dataset_images = discover_dataset_images()
     if not dataset_images:
         print(
-            f"No dataset images found in: {', '.join(DATASET_DIRS)}",
+            f"No dataset images found in: {', '.join(active_dirs) if active_dirs else '[]'}",
             file=sys.stderr,
         )
         embedding_store = {}
         return embedding_store
 
     grouped: Dict[str, List[np.ndarray]] = {}
-    print(f"Initializing embeddings from {len(dataset_images)} images...", file=sys.stderr)
+    print(
+        f"Initializing embeddings from {len(dataset_images)} images in {active_dirs}...",
+        file=sys.stderr
+    )
 
     for img_path in dataset_images:
         regno = normalize_regno(os.path.splitext(os.path.basename(img_path))[0])
@@ -132,15 +146,21 @@ def initialize_embeddings() -> Dict[str, np.ndarray]:
 
         grouped.setdefault(regno, []).append(emb)
 
-    # If multiple images exist for same registration number, average their embeddings.
-    embedding_store = {
-        regno: np.mean(np.stack(embs, axis=0), axis=0).astype(np.float32)
-        for regno, embs in grouped.items()
-        if embs
-    }
+    embedding_store = {regno: embs for regno, embs in grouped.items() if embs}
 
-    print(f"Initialized embeddings for {len(embedding_store)} registration numbers.", file=sys.stderr)
+    total_embeddings = sum(len(v) for v in embedding_store.values())
+    print(
+        f"Initialized {total_embeddings} embeddings for {len(embedding_store)} registration numbers.",
+        file=sys.stderr
+    )
     return embedding_store
+
+
+def best_similarity_to_regno(captured_embedding: np.ndarray, reg_embeddings: List[np.ndarray]) -> float:
+    """Best similarity between captured embedding and any sample of a regno."""
+    if not reg_embeddings:
+        return 0.0
+    return max(cosine_similarity(captured_embedding, emb) for emb in reg_embeddings)
 
 
 def verify_face(register_number: str, base64_image: str) -> dict:
@@ -162,18 +182,52 @@ def verify_face(register_number: str, base64_image: str) -> dict:
             "confidence": 0.0,
         }
 
-    similarity = cosine_similarity(captured_embedding, store[regno])
-    verified = similarity >= SIMILARITY_THRESHOLD
+    # Identification logic:
+    # 1) Claimed registration must be above threshold.
+    # 2) Claimed registration must be the best overall match.
+    # 3) Best match should be separated from second-best by a margin.
+    claimed_similarity = best_similarity_to_regno(captured_embedding, store[regno])
+
+    reg_scores: Dict[str, float] = {}
+    for candidate_regno, candidate_embeddings in store.items():
+        reg_scores[candidate_regno] = best_similarity_to_regno(
+            captured_embedding,
+            candidate_embeddings
+        )
+
+    if not reg_scores:
+        return {
+            "verified": False,
+            "message": "No valid face embeddings available in database",
+            "confidence": 0.0,
+        }
+
+    ranked = sorted(reg_scores.items(), key=lambda item: item[1], reverse=True)
+    best_regno, best_score = ranked[0]
+    second_best_score = ranked[1][1] if len(ranked) > 1 else -1.0
+    margin = best_score - second_best_score
+
+    margin_threshold = 0.08
+    verified = (
+        claimed_similarity >= SIMILARITY_THRESHOLD
+        and best_regno == regno
+        and margin >= margin_threshold
+    )
 
     return {
         "verified": verified,
         "message": (
             "Face matches registration number"
             if verified
-            else "Face does not match registration number"
+            else f"Face does not match registration number (best match: {best_regno})"
         ),
-        "confidence": float(similarity),
+        "confidence": float(claimed_similarity),
         "threshold": SIMILARITY_THRESHOLD,
+        "best_match_regno": best_regno,
+        "best_match_confidence": float(best_score),
+        "second_best_confidence": float(second_best_score),
+        "margin": float(margin),
+        "margin_threshold": margin_threshold,
     }
 
 
