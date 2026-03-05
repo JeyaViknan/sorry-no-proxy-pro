@@ -19,11 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Use virtualenv to avoid Debian's externally-managed Python restriction (PEP 668)
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY requirements.txt ./
-RUN pip3 install --upgrade pip && pip3 install -r requirements.txt
+RUN pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
 
 COPY . .
 
