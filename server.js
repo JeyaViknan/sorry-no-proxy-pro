@@ -8,6 +8,7 @@ const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 8000;
+const APP_DEPLOY_MARKER = "insightface-worker-v2";
 
 app.use(cors({ origin: "*" }));
 app.use(bodyParser.json({ limit: "10mb" }));
@@ -231,6 +232,15 @@ app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
 });
 
+app.get("/healthz", (req, res) => {
+    res.json({
+        ok: true,
+        deployMarker: APP_DEPLOY_MARKER,
+        verifierReady: verifierState.ready,
+        verifierLastError: verifierState.lastError,
+    });
+});
+
 app.get("/", (req, res) => {
-    res.send("✅ Server is running! Use POST /register to register.");
+    res.send(`✅ Server is running (${APP_DEPLOY_MARKER}). Use POST /register to register.`);
 });
