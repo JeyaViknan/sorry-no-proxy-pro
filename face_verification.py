@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Face Verification Service (InsightFace)
-Loads dataset embeddings at startup and verifies a captured face against
+Loads embeddings at startup and verifies a captured face against
 a registration number using cosine similarity.
 """
 
@@ -17,10 +17,9 @@ from insightface.app import FaceAnalysis
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FACE_DB_PATH = os.path.join(SCRIPT_DIR, "face_db.pkl")
-# Match the working `test/` scripts' behavior.
 # NOTE: `face_db.pkl` must contain InsightFace embeddings produced by FaceAnalysis().
-SIMILARITY_THRESHOLD = 0.50
-MARGIN_THRESHOLD = 0.10
+SIMILARITY_THRESHOLD = 0.55
+MARGIN_THRESHOLD = 0.12
 
 # Prefer requested dataset layout.
 PRIMARY_DATASET_DIR = os.path.join(SCRIPT_DIR, "dataset")
@@ -55,8 +54,7 @@ def get_face_app() -> FaceAnalysis:
     if _face_app is not None:
         return _face_app
 
-    # Mirror `test/` scripts: default FaceAnalysis() + CPU mode.
-    app = FaceAnalysis()
+    app = FaceAnalysis(name="buffalo_l")
     app.prepare(ctx_id=-1)
     _face_app = app
     return _face_app
@@ -75,16 +73,17 @@ def embedding_from_bgr_image(img_bgr: np.ndarray, debug_tag: str = "") -> Option
                 print(f"Embedding skipped (no face detected): {debug_tag}", file=sys.stderr)
             return None
 
-        # Mirror `test/` scripts: just take the first detected face.
-        face = faces[0]
+        face = max(
+            faces,
+            key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+        )
         emb = getattr(face, "embedding", None)
         if emb is None:
             if debug_tag:
                 print(f"Embedding skipped (no embedding field): {debug_tag}", file=sys.stderr)
             return None
 
-        # Keep embeddings as float32; cosine_similarity() handles normalization.
-        return np.array(emb, dtype=np.float32).reshape(-1)
+        return l2_normalize(np.array(emb, dtype=np.float32).reshape(-1))
     except Exception as exc:
         if debug_tag:
             print(f"Embedding failed for {debug_tag}: {exc}", file=sys.stderr)
@@ -182,7 +181,7 @@ def initialize_embeddings() -> Dict[str, List[np.ndarray]]:
     """Initialize embedding store.
 
     Preference order:
-    1) `face_db.pkl` (precomputed FaceNet embeddings)
+    1) `face_db.pkl` (precomputed InsightFace embeddings)
     2) Scan dataset images and compute embeddings on the fly
     """
     global embedding_store
@@ -285,12 +284,11 @@ def verify_face(register_number: str, base64_image: str) -> dict:
             "confidence": 0.0,
         }
 
-    # Match `test/` logic: compute best/second-best across DB.
     claimed_similarity = best_similarity_to_regno(captured_embedding, store[regno])
 
     best_regno: Optional[str] = None
-    best_score = 0.0
-    second_best_score = 0.0
+    best_score = -1.0
+    second_best_score = -1.0
 
     for candidate_regno, candidate_embeddings in store.items():
         score = best_similarity_to_regno(captured_embedding, candidate_embeddings)
@@ -301,15 +299,13 @@ def verify_face(register_number: str, base64_image: str) -> dict:
 
     margin = best_score - second_best_score
 
-    # Verification decision (claimed identity prioritized):
-    # - Accept if claimed similarity clears threshold.
-    # - Otherwise, accept if the best global match is the claimed identity and clears threshold
-    #   (optionally with a margin; kept as a soft guard to reduce false accepts).
-    verified = False
-    if claimed_similarity >= SIMILARITY_THRESHOLD:
-        verified = True
-    elif best_regno == regno and best_score >= SIMILARITY_THRESHOLD and margin >= MARGIN_THRESHOLD:
-        verified = True
+    # Strict identity verification: the entered registration number must be
+    # the best global match and sufficiently separated from the runner-up.
+    verified = (
+        claimed_similarity >= SIMILARITY_THRESHOLD
+        and best_regno == regno
+        and margin >= MARGIN_THRESHOLD
+    )
 
     print(
         "Verification diagnostics: "
@@ -346,6 +342,7 @@ def verify_face(register_number: str, base64_image: str) -> dict:
 def serve_forever() -> None:
     """Persistent worker mode for fast repeated verification requests."""
     initialize_embeddings()
+    print(json.dumps({"type": "ready"}), flush=True)
     print("Face verifier ready", file=sys.stderr)
 
     for raw_line in sys.stdin:

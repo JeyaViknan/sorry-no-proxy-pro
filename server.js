@@ -27,9 +27,12 @@ const verifierState = {
     buffer: "",
     nextId: 1,
     pending: new Map(),
+    lastError: null,
+    ready: false,
 };
 
 function rejectAllPending(message) {
+    verifierState.lastError = message;
     for (const { reject, timer } of verifierState.pending.values()) {
         clearTimeout(timer);
         reject(new Error(message));
@@ -57,6 +60,11 @@ function handleVerifierOutput(chunk) {
         }
 
         const requestId = payload.id;
+        if (payload.type === "ready") {
+            verifierState.ready = true;
+            continue;
+        }
+
         const pending = verifierState.pending.get(requestId);
         if (!pending) {
             continue;
@@ -77,11 +85,18 @@ function startVerifierProcess() {
 
     verifierState.process = proc;
     verifierState.buffer = "";
+    verifierState.lastError = null;
+    verifierState.ready = false;
 
     proc.stdout.on("data", handleVerifierOutput);
 
     proc.stderr.on("data", (chunk) => {
-        console.log(`[face-verifier] ${chunk.toString().trim()}`);
+        const message = chunk.toString().trim();
+        if (!message) {
+            return;
+        }
+        verifierState.lastError = message;
+        console.log(`[face-verifier] ${message}`);
     });
 
     proc.on("error", (err) => {
@@ -109,8 +124,8 @@ function verifyFaceWithWorker(registerNumber, faceImage) {
         const requestId = verifierState.nextId++;
         const timer = setTimeout(() => {
             verifierState.pending.delete(requestId);
-            reject(new Error("Face verification request timed out"));
-        }, 10000);
+            reject(new Error(verifierState.lastError || "Face verification request timed out"));
+        }, verifierState.ready ? 15000 : 60000);
 
         verifierState.pending.set(requestId, { resolve, reject, timer });
 
@@ -127,6 +142,11 @@ function verifyFaceWithWorker(registerNumber, faceImage) {
             reject(err);
         }
     });
+}
+
+function formatVerifierError(error) {
+    const message = (error && error.message) || verifierState.lastError || "Face verification failed.";
+    return message.replace(/\s+/g, " ").trim();
 }
 
 // Start verifier worker on server start (preloads embeddings and model once).
@@ -157,7 +177,7 @@ app.post("/verify-face", async (req, res) => {
         res.status(500).json({
             success: false,
             verified: false,
-            message: "Face verification failed. Please try again.",
+            message: formatVerifierError(error),
         });
     }
 });
@@ -185,7 +205,7 @@ app.post("/register", async (req, res) => {
             console.error("Face verification error:", error);
             return res.status(500).json({
                 success: false,
-                message: "Face verification failed. Please try again.",
+                message: formatVerifierError(error),
             });
         }
     }
