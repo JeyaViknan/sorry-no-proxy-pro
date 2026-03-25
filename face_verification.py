@@ -55,7 +55,13 @@ def get_face_app() -> FaceAnalysis:
         return _face_app
 
     model_root = os.environ.get("INSIGHTFACE_HOME")
-    app = FaceAnalysis(name="buffalo_l", root=model_root) if model_root else FaceAnalysis(name="buffalo_l")
+    kwargs = {
+        "name": "buffalo_l",
+        "providers": ["CPUExecutionProvider"],
+    }
+    if model_root:
+        kwargs["root"] = model_root
+    app = FaceAnalysis(**kwargs)
     app.prepare(ctx_id=-1)
     _face_app = app
     return _face_app
@@ -342,6 +348,9 @@ def verify_face(register_number: str, base64_image: str) -> dict:
 
 def serve_forever() -> None:
     """Persistent worker mode for fast repeated verification requests."""
+    # Warm the InsightFace model before declaring readiness so the first
+    # verification request does not pay model download/init cost.
+    get_face_app()
     initialize_embeddings()
     print(json.dumps({"type": "ready"}), flush=True)
     print("Face verifier ready", file=sys.stderr)
