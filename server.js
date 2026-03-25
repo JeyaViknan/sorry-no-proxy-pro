@@ -32,6 +32,10 @@ const verifierState = {
     ready: false,
 };
 
+function isVerifierProgressMessage(message) {
+    return /\d+%\|/.test(message) || /KB\/s/.test(message) || /MB\/s/.test(message);
+}
+
 function rejectAllPending(message) {
     verifierState.lastError = message;
     for (const { reject, timer } of verifierState.pending.values()) {
@@ -96,7 +100,9 @@ function startVerifierProcess() {
         if (!message) {
             return;
         }
-        verifierState.lastError = message;
+        if (!isVerifierProgressMessage(message)) {
+            verifierState.lastError = message;
+        }
         console.log(`[face-verifier] ${message}`);
     });
 

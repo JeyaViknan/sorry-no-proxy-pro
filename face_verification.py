@@ -54,7 +54,8 @@ def get_face_app() -> FaceAnalysis:
     if _face_app is not None:
         return _face_app
 
-    app = FaceAnalysis(name="buffalo_l")
+    model_root = os.environ.get("INSIGHTFACE_HOME")
+    app = FaceAnalysis(name="buffalo_l", root=model_root) if model_root else FaceAnalysis(name="buffalo_l")
     app.prepare(ctx_id=-1)
     _face_app = app
     return _face_app

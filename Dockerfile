@@ -2,7 +2,8 @@ FROM node:20-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    INSIGHTFACE_HOME=/opt/insightface
 
 WORKDIR /app
 
@@ -30,6 +31,15 @@ RUN npm ci --omit=dev
 
 COPY requirements.txt ./
 RUN pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
+
+# Pre-download InsightFace model assets during build so runtime requests do not
+# trigger model downloads and timeout behind a progress bar.
+RUN mkdir -p "${INSIGHTFACE_HOME}" && python - <<'PY'
+from insightface.app import FaceAnalysis
+app = FaceAnalysis(name="buffalo_l", root="/opt/insightface")
+app.prepare(ctx_id=-1)
+print("InsightFace model warmup complete")
+PY
 
 COPY . .
 
