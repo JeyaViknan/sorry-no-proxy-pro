@@ -3,7 +3,12 @@ FROM node:20-bookworm
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    INSIGHTFACE_HOME=/opt/insightface
+    INSIGHTFACE_HOME=/opt/insightface \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 WORKDIR /app
 
@@ -40,6 +45,11 @@ app = FaceAnalysis(name="buffalo_s", allowed_modules=["detection", "recognition"
 app.prepare(ctx_id=-1)
 print("InsightFace model warmup complete")
 PY
+
+COPY data data/
+COPY test test/
+RUN python test/generate_embeddings.py
+RUN ls -lh face_db.pkl
 
 COPY . .
 

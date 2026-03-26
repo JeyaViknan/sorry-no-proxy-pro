@@ -5,9 +5,15 @@ Loads embeddings at startup and verifies a captured face against
 a registration number using cosine similarity.
 """
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import base64
 import json
-import os
 import sys
 from typing import Dict, List, Optional
 
