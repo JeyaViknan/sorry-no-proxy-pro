@@ -56,7 +56,8 @@ def get_face_app() -> FaceAnalysis:
 
     model_root = os.environ.get("INSIGHTFACE_HOME")
     kwargs = {
-        "name": "buffalo_l",
+        "name": "buffalo_s",
+        "allowed_modules": ["detection", "recognition"],
         "providers": ["CPUExecutionProvider"],
     }
     if model_root:

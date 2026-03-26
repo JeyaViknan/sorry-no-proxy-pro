@@ -36,7 +36,7 @@ RUN pip install --upgrade pip setuptools wheel && pip install -r requirements.tx
 # trigger model downloads and timeout behind a progress bar.
 RUN mkdir -p "${INSIGHTFACE_HOME}" && python - <<'PY'
 from insightface.app import FaceAnalysis
-app = FaceAnalysis(name="buffalo_l", root="/opt/insightface")
+app = FaceAnalysis(name="buffalo_s", allowed_modules=["detection", "recognition"], root="/opt/insightface")
 app.prepare(ctx_id=-1)
 print("InsightFace model warmup complete")
 PY

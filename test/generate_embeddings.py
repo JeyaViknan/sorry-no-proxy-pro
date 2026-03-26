@@ -4,7 +4,7 @@ import pickle
 from insightface.app import FaceAnalysis
 
 # Initialize InsightFace
-app = FaceAnalysis()
+app = FaceAnalysis(name="buffalo_s", allowed_modules=["detection", "recognition"], providers=["CPUExecutionProvider"])
 app.prepare(ctx_id=-1)  # CPU mode
 
 DATASET_PATH = "data"
