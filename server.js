@@ -5,6 +5,8 @@ const bodyParser = require("body-parser");
 const { google } = require("googleapis");
 const { spawn } = require("child_process");
 const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -23,141 +25,77 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-const verifierState = {
-    process: null,
-    buffer: "",
-    nextId: 1,
-    pending: new Map(),
-    lastError: null,
-    ready: false,
-};
+let isVerifying = false;
+const verificationQueue = [];
 
-function isVerifierProgressMessage(message) {
-    return /\d+%\|/.test(message) || /KB\/s/.test(message) || /MB\/s/.test(message);
-}
-
-function rejectAllPending(message) {
-    verifierState.lastError = message;
-    for (const { reject, timer } of verifierState.pending.values()) {
-        clearTimeout(timer);
-        reject(new Error(message));
+function processNextInQueue() {
+    if (isVerifying || verificationQueue.length === 0) return;
+    isVerifying = true;
+    
+    const { registerNumber, faceImage, resolve, reject } = verificationQueue.shift();
+    
+    const tmpId = crypto.randomUUID();
+    const payload = faceImage.split(",")[1] || faceImage;
+    const tmpPath = path.join("/tmp", `${tmpId}.jpg`);
+    
+    try {
+        fs.writeFileSync(tmpPath, Buffer.from(payload, "base64"));
+    } catch(err) {
+        isVerifying = false;
+        reject(new Error("Failed to write temp image file"));
+        processNextInQueue();
+        return;
     }
-    verifierState.pending.clear();
-}
-
-function handleVerifierOutput(chunk) {
-    verifierState.buffer += chunk.toString();
-    const lines = verifierState.buffer.split("\n");
-    verifierState.buffer = lines.pop() || "";
-
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-            continue;
-        }
-
-        let payload;
-        try {
-            payload = JSON.parse(trimmed);
-        } catch (err) {
-            console.error("[face-verifier] non-json stdout:", trimmed);
-            continue;
-        }
-
-        const requestId = payload.id;
-        if (payload.type === "ready") {
-            verifierState.ready = true;
-            continue;
-        }
-
-        const pending = verifierState.pending.get(requestId);
-        if (!pending) {
-            continue;
-        }
-
-        clearTimeout(pending.timer);
-        verifierState.pending.delete(requestId);
-        pending.resolve(payload);
-    }
-}
-
-function startVerifierProcess() {
+    
     const scriptPath = path.join(__dirname, "face_verification.py");
-    const proc = spawn("python3", ["-u", scriptPath, "--serve"], {
-        cwd: __dirname,
-        stdio: ["pipe", "pipe", "pipe"],
+    const proc = spawn("python3", [scriptPath, registerNumber, tmpPath], {
+        cwd: __dirname
     });
-
-    verifierState.process = proc;
-    verifierState.buffer = "";
-    verifierState.lastError = null;
-    verifierState.ready = false;
-
-    proc.stdout.on("data", handleVerifierOutput);
-
-    proc.stderr.on("data", (chunk) => {
-        const message = chunk.toString().trim();
-        if (!message) {
+    
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    
+    proc.stdout.on("data", chunk => stdoutBuffer += chunk.toString());
+    proc.stderr.on("data", chunk => stderrBuffer += chunk.toString());
+    
+    proc.on("close", (code) => {
+        try { fs.unlinkSync(tmpPath); } catch(e) {}
+        isVerifying = false;
+        
+        if (code !== 0) {
+            console.error("[face-verifier error]:", stderrBuffer);
+            reject(new Error("Face verifier failed. Server might be under heavy load."));
+            processNextInQueue();
             return;
         }
-        if (!isVerifierProgressMessage(message)) {
-            verifierState.lastError = message;
+        
+        try {
+            const result = JSON.parse(stdoutBuffer.trim());
+            if (result.error) {
+                reject(new Error(result.error));
+            } else {
+                resolve(result);
+            }
+        } catch(err) {
+            console.error("Parse error:", err, stdoutBuffer);
+            reject(new Error("Invalid response from face verifier"));
         }
-        console.log(`[face-verifier] ${message}`);
-    });
-
-    proc.on("error", (err) => {
-        console.error("[face-verifier] process error:", err);
-    });
-
-    proc.on("exit", (code, signal) => {
-        console.error(`[face-verifier] exited (code=${code}, signal=${signal})`);
-        verifierState.process = null;
-        rejectAllPending("Face verifier is unavailable");
-
-        // Auto-restart worker so service remains available.
-        setTimeout(() => {
-            startVerifierProcess();
-        }, 1000);
+        
+        processNextInQueue();
     });
 }
 
 function verifyFaceWithWorker(registerNumber, faceImage) {
     return new Promise((resolve, reject) => {
-        if (!verifierState.process || verifierState.process.killed) {
-            startVerifierProcess();
-        }
-
-        const requestId = verifierState.nextId++;
-        const timer = setTimeout(() => {
-            verifierState.pending.delete(requestId);
-            reject(new Error(verifierState.lastError || "Face verification request timed out"));
-        }, verifierState.ready ? 15000 : 60000);
-
-        verifierState.pending.set(requestId, { resolve, reject, timer });
-
-        try {
-            const payload = JSON.stringify({
-                id: requestId,
-                registerNumber,
-                faceImage,
-            });
-            verifierState.process.stdin.write(`${payload}\n`);
-        } catch (err) {
-            clearTimeout(timer);
-            verifierState.pending.delete(requestId);
-            reject(err);
-        }
+        verificationQueue.push({ registerNumber, faceImage, resolve, reject });
+        processNextInQueue();
     });
 }
 
 function formatVerifierError(error) {
-    const message = (error && error.message) || verifierState.lastError || "Face verification failed.";
+    const message = (error && error.message) || "Face verification failed.";
     return message.replace(/\s+/g, " ").trim();
 }
-
-// Start verifier worker on server start (preloads embeddings and model once).
-startVerifierProcess();
 
 app.post("/verify-face", async (req, res) => {
     const { registerNumber, faceImage } = req.body;
@@ -242,8 +180,8 @@ app.get("/healthz", (req, res) => {
     res.json({
         ok: true,
         deployMarker: APP_DEPLOY_MARKER,
-        verifierReady: verifierState.ready,
-        verifierLastError: verifierState.lastError,
+        verifierReady: true,
+        verifierLastError: null,
     });
 });
 

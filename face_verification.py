@@ -118,6 +118,16 @@ def extract_embedding_from_base64(base64_image: str) -> Optional[np.ndarray]:
         print(f"Failed to process captured image: {exc}", file=sys.stderr)
         return None
 
+def extract_embedding_from_file(image_path: str) -> Optional[np.ndarray]:
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        return embedding_from_bgr_image(img, debug_tag="captured_frame")
+    except Exception as exc:
+        print(f"Failed to process image file: {exc}", file=sys.stderr)
+        return None
+
 
 def get_active_dataset_dirs() -> List[str]:
     """Use only dataset/ when present; otherwise fallback to legacy folders."""
@@ -279,7 +289,7 @@ def best_similarity_to_regno(captured_embedding: np.ndarray, reg_embeddings: Lis
     return max(cosine_similarity(captured_embedding, emb) for emb in reg_embeddings)
 
 
-def verify_face(register_number: str, base64_image: str) -> dict:
+def verify_face(register_number: str, image_data: str) -> dict:
     store = initialize_embeddings()
     regno = normalize_regno(register_number)
 
@@ -290,7 +300,11 @@ def verify_face(register_number: str, base64_image: str) -> dict:
             "confidence": 0.0,
         }
 
-    captured_embedding = extract_embedding_from_base64(base64_image)
+    if os.path.exists(image_data):
+        captured_embedding = extract_embedding_from_file(image_data)
+    else:
+        captured_embedding = extract_embedding_from_base64(image_data)
+
     if captured_embedding is None:
         return {
             "verified": False,
