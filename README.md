@@ -1,3 +1,12 @@
+---
+title: Sorry No Proxy
+emoji: 🛡️
+colorFrom: green
+colorTo: blue
+sdk: docker
+app_port: 7860
+---
+
 # 🙅‍♂️ Sorry-No-Proxy 
 > Because if you weren’t there, you weren’t *really* there.
 
