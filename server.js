@@ -9,8 +9,8 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const app = express();
-const PORT = process.env.PORT || 8000;
-const APP_DEPLOY_MARKER = "insightface-worker-v2";
+const PORT = process.env.PORT || 7860;
+const APP_DEPLOY_MARKER = "insightface-worker-huggingface";
 
 app.use(cors({ origin: "*" }));
 app.use(bodyParser.json({ limit: "10mb" }));

@@ -54,5 +54,5 @@ RUN ls -lh face_db.pkl
 COPY . .
 
 ENV NODE_ENV=production
-EXPOSE 10000
+EXPOSE 7860
 CMD ["node", "server.js"]
