@@ -70,14 +70,23 @@ function processNextInQueue() {
         }
         
         try {
-            const result = JSON.parse(stdoutBuffer.trim());
+            const lines = stdoutBuffer.trim().split("\n");
+            let jsonString = lines[lines.length - 1] || "";
+            for (let i = lines.length - 1; i >= 0; i--) {
+                const line = lines[i].trim();
+                if (line.startsWith("{") && line.endsWith("}")) {
+                    jsonString = line;
+                    break;
+                }
+            }
+            const result = JSON.parse(jsonString);
             if (result.error) {
                 reject(new Error(result.error));
             } else {
                 resolve(result);
             }
         } catch(err) {
-            console.error("Parse error:", err, stdoutBuffer);
+            console.error("Parse error:", err, "\n[STDOUT DUMP]:", stdoutBuffer);
             reject(new Error("Invalid response from face verifier"));
         }
         
