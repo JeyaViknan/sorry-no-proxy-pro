@@ -206,16 +206,31 @@
       const video = faceVideo;
       const canvas = faceCanvas;
       
-      // Set canvas dimensions to match video
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      // Calculate scaled dimensions (max width 480px)
+      const MAX_WIDTH = 480;
+      let width = video.videoWidth;
+      let height = video.videoHeight;
       
-      // Draw current video frame to canvas
+      if (width > MAX_WIDTH) {
+        height = Math.floor(height * (MAX_WIDTH / width));
+        width = MAX_WIDTH;
+      }
+      
+      // Prevent crash if video dimensions are 0
+      if (width === 0 || height === 0) {
+        width = 320;
+        height = 240;
+      }
+      
+      canvas.width = width;
+      canvas.height = height;
+      
+      // Draw scaled video frame to canvas
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(video, 0, 0, width, height);
       
-      // Convert to base64
-      return canvas.toDataURL("image/jpeg", 0.8);
+      // Convert to heavily compressed base64 JPEG
+      return canvas.toDataURL("image/jpeg", 0.7);
     }
 
     function stopFaceCapture() {
