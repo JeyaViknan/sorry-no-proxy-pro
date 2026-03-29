@@ -263,14 +263,16 @@
         return;
       }
 
-      // Show captured image preview and hide live video
-      if (faceVideo && faceCanvas) {
-        faceCanvas.style.display = "block";
-        faceVideo.style.display = "none";
-      }
+      // Completely hide scanner and inputs so it appears as a blank processing page
+      document.getElementById("face-capture-container").style.display = "none";
+      document.getElementById("registerNumber").style.display = "none";
+      document.querySelector(".success-text").style.display = "none";
 
       btn.style.display = "none";
+      
       loading.style.display = "block";
+      loading.innerText = "Processing your attendance... Please wait until the face is verified.";
+      
       result.innerText = "";
       faceStatus.innerText = "";
       result.style.color = "#388e3c";
@@ -292,20 +294,11 @@
         const verifyData = await verifyRes.json();
 
         if (!verifyData.verified) {
-          faceStatus.innerText = `Face verification failed: ${verifyData.message || "Face does not match registration number"}`;
+          faceStatus.innerText = "Verification failed. Please speak to the professor.";
           faceStatus.style.color = "#d32f2f";
-          // Restore live video for retry
-          if (faceVideo && faceCanvas) {
-            faceCanvas.style.display = "none";
-            faceVideo.style.display = "block";
-            try {
-              faceVideo.play();
-            } catch (e) {
-              console.warn("Unable to resume video:", e);
-            }
-          }
           loading.style.display = "none";
-          btn.style.display = "block";
+          
+          // DO NOT restore video or allow retries. The session ends here to prevent brute-forcing.
           return;
         }
 
@@ -327,13 +320,12 @@
           // Stop face capture
           stopFaceCapture();
           
-          // Show success
           if (data.code) {
-            result.innerText = `Success! Your code: ${data.code}. Redirecting...`;
+            result.innerText = `Success! Your specific attendance code: ${data.code}. Redirecting...`;
           } else {
             result.innerText = `Success! Redirecting...`;
           }
-          faceStatus.innerText = "Attendance recorded successfully!";
+          faceStatus.innerText = "Attendance verified securely!";
           faceStatus.style.color = "#2e7d32";
 
           // Redirect after short delay
