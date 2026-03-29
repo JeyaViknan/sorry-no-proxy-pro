@@ -39,12 +39,8 @@ RUN pip install --upgrade pip setuptools wheel && pip install -r requirements.tx
 
 # Pre-download InsightFace model assets during build so runtime requests do not
 # trigger model downloads and timeout behind a progress bar.
-RUN mkdir -p "${INSIGHTFACE_HOME}" && python - <<'PY'
-from insightface.app import FaceAnalysis
-app = FaceAnalysis(name="buffalo_s", allowed_modules=["detection", "recognition"], root="/opt/insightface")
-app.prepare(ctx_id=-1)
-print("InsightFace model warmup complete")
-PY
+RUN mkdir -p "${INSIGHTFACE_HOME}" && \
+    python3 -c "from insightface.app import FaceAnalysis; app = FaceAnalysis(name='buffalo_s', allowed_modules=['detection', 'recognition'], root='/opt/insightface'); app.prepare(ctx_id=-1); print('InsightFace model warmup complete')"
 
 COPY data data/
 COPY test test/
