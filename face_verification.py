@@ -24,8 +24,8 @@ from insightface.app import FaceAnalysis
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FACE_DB_PATH = os.path.join(SCRIPT_DIR, "face_db.pkl")
 # NOTE: `face_db.pkl` must contain InsightFace embeddings produced by FaceAnalysis().
-SIMILARITY_THRESHOLD = 0.55
-MARGIN_THRESHOLD = 0.12
+SIMILARITY_THRESHOLD = 0.50
+MARGIN_THRESHOLD = 0.12 # Kept for diagnostics but no longer used for strict block
 
 # Prefer requested dataset layout.
 PRIMARY_DATASET_DIR = os.path.join(SCRIPT_DIR, "dataset")
@@ -62,7 +62,7 @@ def get_face_app() -> FaceAnalysis:
 
     model_root = os.environ.get("INSIGHTFACE_HOME")
     kwargs = {
-        "name": "buffalo_s",
+        "name": "buffalo_l",
         "allowed_modules": ["detection", "recognition"],
         "providers": ["CPUExecutionProvider"],
     }
@@ -327,12 +327,11 @@ def verify_face(register_number: str, image_data: str) -> dict:
 
     margin = best_score - second_best_score
 
-    # Strict identity verification: the entered registration number must be
-    # the best global match and sufficiently separated from the runner-up.
+    # 1-to-1 identity verification: the entered registration number just needs to
+    # exceed the similarity threshold, resolving issues where users look slightly
+    # more like someone else due to wearing glasses or aging.
     verified = (
         claimed_similarity >= SIMILARITY_THRESHOLD
-        and best_regno == regno
-        and margin >= MARGIN_THRESHOLD
     )
 
     print(
