@@ -11,7 +11,7 @@
  * and could be picked out without decoding anything.
  */
 
-import { makeDecoy } from "../QR-Faculty-Portal/src/lib/session.js";
+import { makeDecoy } from "../QR-Faculty-Portal/src/lib/decoy.js";
 
 const BASE = process.env.BASE_URL || "http://localhost:7860";
 const CODE = process.env.FACULTY_ACCESS_CODE || "dev-faculty-code-123";

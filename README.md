@@ -9,96 +9,138 @@ app_port: 7860
 
 # Sorry No Proxy
 
-Classroom attendance that resists proxies: a rotating, server-signed QR code
-on the projector, plus face verification on the student's own phone.
+Classroom attendance that resists proxies: a rotating, server-signed QR code on
+the projector, plus face verification on the student's own phone.
 
 ```
-┌─ Faculty display ─┐      ┌─ Backend ────────┐      ┌─ Student scanner ─┐
-│ React + Vite      │─────▶│ Node + Express   │◀─────│ Vanilla ES modules│
-│ shows signed QR   │      │ signs QR payloads│      │ scans, then face  │
-│ rotating ~400ms   │      │ issues tokens    │      │ 25KB gzipped      │
-└───────────────────┘      │ Python verifier  │      └───────────────────┘
-                           │ (warm ONNX pool) │
-                           └──────────────────┘
+┌─ Faculty portal ──┐      ┌─ Backend ─────────────┐
+│ React + Vite      │─────▶│ Node + Express        │
+│ Cloudflare Pages  │      │ Google Cloud Run      │
+│ shows signed QR   │      │  • signs QR payloads  │
+│ rotating ~400ms   │      │  • issues tokens      │
+└───────────────────┘      │  • Python verifier    │
+                           │    (warm ONNX pool)   │
+┌─ Student scanner ─┐      │  • serves the scanner │
+│ Vanilla ES modules│◀────▶│                       │
+│ 25 KB gzipped     │      └───────────┬───────────┘
+│ same origin ──────┘                  │
+└───────────────────┘      ┌───────────▼───────────┐
+                           │ Cloud Storage         │
+                           │ face_db.npz (private) │
+                           └───────────────────────┘
 ```
 
-## Quick start
+**→ Deploying? [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the step-by-step guide.**
+
+---
+
+## Run it locally
 
 ```bash
-cp .env.example .env
-node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"  # for each secret
-
 npm install
-npm start                                  # backend  → http://localhost:7860
-npm run dev --prefix QR-Faculty-Portal     # faculty  → http://localhost:5173
+cp .env.example .env
 ```
 
-Students open the backend origin directly; the scanner is served from
-`public/`.
+Generate the three secrets `.env` needs:
 
-> **HTTPS is required** for camera access outside `localhost`.
+```bash
+node -e "console.log('QR_SIGNING_SECRET='+require('crypto').randomBytes(32).toString('base64url'))"
+node -e "console.log('TOKEN_SIGNING_SECRET='+require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+Set `FACULTY_ACCESS_CODE` to anything 12+ characters, then:
+
+```bash
+npm start                                  # backend + scanner → localhost:7860
+npm run dev --prefix QR-Faculty-Portal     # faculty portal    → localhost:5173
+```
+
+The faculty dev server proxies `/api` to the backend, so no extra config.
+
+> The backend refuses to start without `gallery/face_db.npz`. Build one with
+> `npm run build:gallery`, or point `GALLERY_GCS_URI` at a bucket.
+
+> Camera access needs a secure context. `localhost` counts; a LAN IP does not —
+> to test on a phone, use `npx localtunnel --port 7860` or deploy.
+
+---
 
 ## How it works
 
 The faculty display holds **no secret**. It requests batches of pre-signed
-payloads from the backend and shows them on schedule, padding the gaps with
-decoys that are format-identical to the real thing. A payload is valid for one
+payloads from the backend and shows them on schedule, padding gaps with decoys
+that are format-identical to the real thing. A payload is valid for one
 4-second slot, judged by the **server's** clock.
 
-A student scans, the server validates, and issues a single-use, device-bound
+A student scans; the server validates and issues a single-use, device-bound
 attendance token. That token is the only way to reach `POST /api/attendance`,
 which verifies a burst of face frames against the enrollment gallery before
 recording anything.
 
-Full contract, threat model and what is *not* prevented: **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+Full contract, threat model, and what is explicitly *not* prevented:
+**[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+
+---
 
 ## Layout
 
 ```
-server/          Node backend — routes, services, middleware
-python/          Face pipeline; face_pipeline/ is pure NumPy except engine.py
-public/          Student scanner (no build step, no framework)
-QR-Faculty-Portal/  Faculty display (React + Vite)
-gallery/         Enrollment data — gitignored, never web-served
-docs/            Protocol, deployment, enrollment SOP
-scripts/         Integration and decoy checks
+server/              Node backend — routes, services, middleware
+python/              Face pipeline; face_pipeline/ is pure NumPy except engine.py
+public/              Student scanner (no build step, no framework)
+QR-Faculty-Portal/   Faculty display (React + Vite)
+gallery/             Enrollment data — gitignored, never web-served
+scripts/             Setup, deploy, and operational scripts
+docs/                Deployment, protocol, enrollment
 ```
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `npm start` | Run the backend |
+| `npm test` | 31 unit + contract tests |
+| `npm run build:gallery` | Turn `gallery/images/` into `face_db.npz`, quality-gating each photo |
+| `npm run verify:gallery` | Audit the gallery; recommend thresholds; flag lookalikes |
+| `./scripts/setup-gcp.sh` | One-time Google Cloud setup |
+| `./scripts/deploy-backend.sh` | Deploy to Cloud Run |
+| `./scripts/deploy-faculty.sh` | Build + deploy the portal to Cloudflare Pages |
+| `./scripts/upload-gallery.sh` | Push the gallery to Cloud Storage |
+| `./scripts/warm.sh on\|off` | Keep an instance warm around class time |
 
 ## Testing
 
 ```bash
-npm test                                          # 21 token/security tests
-./.venv/bin/python python/tests/test_pipeline.py  # 35 pipeline tests
-node scripts/integration-test.mjs                 # 37 protocol assertions
+npm test                                          # 31 Node
+./.venv/bin/python python/tests/test_pipeline.py  # 35 Python
+node scripts/integration-test.mjs                 # 37 protocol + attack surface
 node scripts/decoy-check.mjs                      # decoy indistinguishability
 ```
 
-## Enrollment
+The integration suite asserts the historical attack paths stay closed —
+`POST /register`, `GET /gallery/images/…`, the old hardcoded QR string.
 
-The gallery currently holds **one image per student**, which is the main cause
-of false rejections, and contains one lookalike pair that collides at the
-configured threshold. Both are documented with the fix in
-**[docs/ENROLLMENT.md](docs/ENROLLMENT.md)**.
+---
 
-When new photographs arrive:
+## Known limitations
 
-```bash
-# drop images into gallery/images/ as {REGNO}_{NN}_{variant}.jpg
-npm run build:gallery     # quality-gates every image, reports what to retake
-npm run verify:gallery    # audits the gallery, calibrates the threshold
-```
+These are real and documented, not oversights:
 
-No code changes needed.
-
-## Deployment
-
-Google Cloud Run in `asia-south1` is recommended; rationale and alternatives
-in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+- **No liveness detection.** A photo of another student held up to the camera
+  still passes. Largest remaining gap.
+- **Single-image gallery.** The current 67 students have one enrollment photo
+  each — the main cause of false rejections, and why `25BRS1169`/`25BRS1286`
+  collide at the old 0.50 threshold. See [docs/ENROLLMENT.md](docs/ENROLLMENT.md).
+- **Thresholds are not calibrated** for your cohort. `npm run verify:gallery`
+  computes them once multi-image enrollment data exists.
+- **Session state is in-memory.** Correct for one instance (a few thousand
+  students per class). Multiple instances need a shared store — swap
+  `SessionStore` for a Redis implementation with the same interface.
 
 ## Privacy
 
 Student face images are sensitive personal data under the DPDP Act 2023. They
-are gitignored, excluded from the Docker build context (only derived
-embeddings enter the image), and never served over HTTP. See
-[docs/ENROLLMENT.md](docs/ENROLLMENT.md) for retention and the outstanding
-git-history cleanup.
+are gitignored, excluded from the container image (only derived embeddings ship),
+stored in a private bucket with public access prevention, and never served over
+HTTP. See [docs/ENROLLMENT.md](docs/ENROLLMENT.md) for retention and the
+outstanding git-history cleanup.

@@ -9,7 +9,11 @@
  * mid-class. Fail at boot, loudly, where it is cheap to fix.
  */
 
-require("dotenv").config();
+// quiet: dotenv v17 prints a promotional banner to stdout, which corrupts the
+// first lines of a JSON log stream that an aggregator is trying to parse.
+// On Cloud Run there is no .env file anyway — config comes from the
+// environment and Secret Manager.
+require("dotenv").config({ quiet: true });
 
 const path = require("path");
 
@@ -101,18 +105,37 @@ if (allowedOrigins.includes("*")) {
 const sheetsEmail = optional("GOOGLE_SERVICE_ACCOUNT_EMAIL");
 const sheetsKeyRaw = optional("GOOGLE_PRIVATE_KEY");
 const sheetId = optional("SHEET_ID");
-const sheetsEnabled = Boolean(sheetsEmail && sheetsKeyRaw && sheetId);
 
-if (!sheetsEnabled && (sheetsEmail || sheetsKeyRaw || sheetId)) {
+// SHEET_ID alone is enough: on Cloud Run the credential comes from the
+// instance metadata server, so no key needs to exist in the environment.
+// An explicit key is only needed off-platform (local development).
+const sheetsEnabled = Boolean(sheetId);
+
+if (sheetsEnabled && !sheetsEmail && !sheetsKeyRaw) {
   warnings.push(
-    "Google Sheets is partially configured and therefore disabled. Set all of " +
-      "GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY and SHEET_ID, or none."
+    "Sheets export will authenticate via the instance service account " +
+      "(metadata server). Off Google Cloud this fails — set " +
+      "GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY for local use."
+  );
+}
+if ((sheetsEmail && !sheetsKeyRaw) || (!sheetsEmail && sheetsKeyRaw)) {
+  errors.push(
+    "GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY must be set together, or neither."
   );
 }
 if (!sheetsEnabled) {
   warnings.push(
-    "Google Sheets export is OFF. Attendance is still recorded server-side and " +
-      "can be exported later — a Sheets outage never blocks a class."
+    "Google Sheets export is OFF (SHEET_ID unset). Attendance is still recorded " +
+      "server-side and exportable via /api/sessions/:id/export — a Sheets outage " +
+      "never blocks a class."
+  );
+}
+
+// Validate the gallery URI at boot rather than mid-startup.
+const galleryGcsUri = optional("GALLERY_GCS_URI");
+if (galleryGcsUri && !/^gs:\/\/[^/]+\/.+$/.test(galleryGcsUri)) {
+  errors.push(
+    `GALLERY_GCS_URI must look like gs://bucket-name/face_db.npz (got "${galleryGcsUri}")`
   );
 }
 
@@ -177,10 +200,19 @@ const config = Object.freeze({
     requestTimeoutMs: integer("FACE_REQUEST_TIMEOUT_MS", 20000, { min: 3000, max: 60000 }),
   }),
 
+  google: Object.freeze({
+    clientEmail: sheetsEmail,
+    // Secret managers and shells frequently deliver literal backslash-n.
+    privateKey: sheetsKeyRaw.replace(/\\n/g, "\n"),
+    scopes: Object.freeze([
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/devstorage.read_only",
+    ]),
+    galleryGcsUri,
+  }),
+
   sheets: Object.freeze({
     enabled: sheetsEnabled,
-    clientEmail: sheetsEmail,
-    privateKey: sheetsKeyRaw.replace(/\\n/g, "\n"),
     spreadsheetId: sheetId,
     range: optional("SHEET_RANGE", "Attendance!A:G"),
     flushIntervalMs: integer("SHEET_FLUSH_INTERVAL_MS", 5000, { min: 1000, max: 60000 }),

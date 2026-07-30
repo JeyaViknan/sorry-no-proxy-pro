@@ -16,11 +16,14 @@ const { config, validateOrExit } = require("./config");
 const { logger } = require("./logger");
 const { createApp } = require("./app");
 const { FaceVerifierPool } = require("./services/faceWorker");
+const { GoogleAuth } = require("./services/googleAuth");
+const { ensureGallery } = require("./services/galleryBootstrap");
 
 validateOrExit(logger);
 
+const googleAuth = new GoogleAuth(config.google, logger);
 const faceVerifier = new FaceVerifierPool({ config, logger });
-const app = createApp({ config, faceVerifier });
+const app = createApp({ config, faceVerifier, googleAuth });
 
 const server = app.listen(config.port, "0.0.0.0", () => {
   logger.info("server listening", {
@@ -38,17 +41,45 @@ const server = app.listen(config.port, "0.0.0.0", () => {
 server.keepAliveTimeout = 72_000;
 server.headersTimeout = 75_000;
 
-faceVerifier.start();
-faceVerifier
-  .waitUntilReady()
-  .then(() => logger.info("face verifier warm — accepting verifications"))
-  .catch((error) => {
+/**
+ * Startup order matters.
+ *
+ * The port is already open (above) so the platform's health probe succeeds and
+ * the container is not killed while the model loads — but /readyz stays 503
+ * until a worker is warm, which is the signal an orchestrator should gate
+ * traffic on.
+ *
+ * The gallery must land on disk BEFORE the workers spawn: a worker that
+ * starts without one exits and enters restart backoff, turning a 3-second
+ * download into a minute of flapping.
+ */
+(async () => {
+  try {
+    const gallery = await ensureGallery({ config, auth: googleAuth, logger });
+    logger.info("gallery ready", gallery);
+  } catch (error) {
     logger.error(
-      "face verifier did not become ready. Verification requests will fail " +
-        "with VERIFIER_UNAVAILABLE until a worker recovers.",
+      "FATAL: could not obtain the face gallery. The service cannot verify " +
+        "anyone. See docs/DEPLOYMENT.md#gallery.",
       error
     );
-  });
+    // Exit rather than serve: a running instance that rejects every student
+    // is worse than one the orchestrator will restart and alert on.
+    process.exit(1);
+  }
+
+  faceVerifier.start();
+  faceVerifier
+    .waitUntilReady()
+    .then(() => logger.info("face verifier warm — accepting verifications"))
+    .catch((error) => {
+      logger.error(
+        "face verifier did not become ready. Verification requests will fail " +
+          "with VERIFIER_UNAVAILABLE until a worker recovers.",
+        error
+      );
+    });
+})();
 
 // ── Graceful shutdown ───────────────────────────────────────────────
 let shuttingDown = false;

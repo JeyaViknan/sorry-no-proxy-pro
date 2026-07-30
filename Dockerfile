@@ -40,6 +40,7 @@ FROM ${NODE_IMAGE} AS python-deps
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NO_ALBUMENTATIONS_UPDATE=1 \
     INSIGHTFACE_HOME=/opt/insightface
 
 # Build toolchain compiles insightface's Cython extensions and is discarded
@@ -85,7 +86,11 @@ ENV NODE_ENV=production \
     # and make the pool slower under load.
     OMP_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
-    MKL_NUM_THREADS=1
+    MKL_NUM_THREADS=1 \
+    # albumentations (pulled in by insightface) phones home for a version
+    # check on import. That is a network round trip on every worker start,
+    # and it fails noisily in a container with no outbound CA trust.
+    NO_ALBUMENTATIONS_UPDATE=1
 
 # `python3` (not python3-minimal): the venv symlinks to the system stdlib, and
 # the minimal package omits modules the verifier imports.
@@ -113,8 +118,8 @@ COPY --chown=node:node gallery ./gallery
 
 # Unit tests live beside the code for discoverability but have no business in
 # a production image.
-RUN rm -f server/services/*.test.js && \
-    find /app/python -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+RUN find /app/server -name '*.test.js' -delete && \
+    find /app/python -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 USER node
 

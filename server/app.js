@@ -22,13 +22,14 @@ const { QrTokenService } = require("./services/qrToken");
 const { AttendanceTokenService } = require("./services/attendanceToken");
 const { SessionStore } = require("./services/sessionStore");
 const { SheetsExporter } = require("./services/sheets");
+const { GoogleAuth } = require("./services/googleAuth");
 
 const { createHealthRouter } = require("./routes/health");
 const { createSessionRouter } = require("./routes/session");
 const { createQrRouter } = require("./routes/qr");
 const { createAttendanceRouter } = require("./routes/attendance");
 
-function createApp({ config, faceVerifier }) {
+function createApp({ config, faceVerifier, googleAuth = null }) {
   const startedAt = Date.now();
   const app = express();
 
@@ -56,7 +57,10 @@ function createApp({ config, faceVerifier }) {
     qrTokenTtlMs: config.qr.tokenTtlMs,
   });
 
-  const sheets = new SheetsExporter(config.sheets, logger);
+  // One credential provider for Sheets and Cloud Storage alike. Injected so
+  // index.js can share the same instance with the gallery bootstrap.
+  const auth = googleAuth || new GoogleAuth(config.google, logger);
+  const sheets = new SheetsExporter(config.sheets, auth, logger);
 
   const facultyAuth = new FacultyAuth({
     secret: config.secrets.tokenSigning,
@@ -131,7 +135,7 @@ function createApp({ config, faceVerifier }) {
   app.use(notFoundHandler);
   app.use(errorHandler);
 
-  app.locals.services = { qrTokens, attendanceTokens, store, sheets, facultyAuth };
+  app.locals.services = { qrTokens, attendanceTokens, store, sheets, facultyAuth, auth };
   return app;
 }
 

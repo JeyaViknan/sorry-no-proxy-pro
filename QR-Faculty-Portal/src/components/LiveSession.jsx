@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { exportUrl } from "../lib/session.js";
+import { downloadExport } from "../lib/session.js";
 
 /**
  * The projected view.
@@ -13,9 +13,11 @@ import { exportUrl } from "../lib/session.js";
  * panel, at the library's default 128px. That is unreadable past the third
  * row.
  */
-export default function LiveSession({ session, qrNode, status, summary, onEnd }) {
+export default function LiveSession({ session, qrNode, status, summary, onEnd, token }) {
   const [focusMode, setFocusMode] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -62,6 +64,18 @@ export default function LiveSession({ session, qrNode, status, summary, onEnd })
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleFullscreen]);
+
+  const handleDownload = useCallback(async () => {
+    setDownloading(true);
+    setDownloadError("");
+    try {
+      await downloadExport({ token, sessionId: session.sessionId, label: session.label });
+    } catch (error) {
+      setDownloadError(error.message || "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  }, [token, session.sessionId, session.label]);
 
   const minutes = String(Math.floor(elapsed / 60)).padStart(2, "0");
   const seconds = String(elapsed % 60).padStart(2, "0");
@@ -117,9 +131,19 @@ export default function LiveSession({ session, qrNode, status, summary, onEnd })
             >
               Hide panel <kbd>H</kbd>
             </button>
-            <a className="btn btn-ghost btn-sm" href={exportUrl(session.sessionId)} download>
-              Download CSV
-            </a>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={handleDownload}
+              disabled={downloading}
+            >
+              {downloading ? "Preparing…" : "Download CSV"}
+            </button>
+            {downloadError && (
+              <p className="rail-note warn" role="alert">
+                {downloadError}
+              </p>
+            )}
             <button type="button" className="btn btn-danger btn-sm" onClick={onEnd}>
               End session
             </button>

@@ -28,22 +28,19 @@
  * cannot take attendance".
  */
 
-const crypto = require("crypto");
-
-const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const MAX_BATCH_ROWS = 200;
 const MAX_RETRIES = 5;
 
-function base64url(input) {
-  return Buffer.from(input).toString("base64url");
-}
-
 class SheetsExporter {
-  constructor({ enabled, clientEmail, privateKey, spreadsheetId, range, flushIntervalMs }, logger) {
+  /**
+   * @param {object} settings config.sheets
+   * @param {import("./googleAuth").GoogleAuth} auth shared token provider —
+   *   on Cloud Run this resolves via the metadata server, so no private key
+   *   needs to exist in the environment at all.
+   */
+  constructor({ enabled, spreadsheetId, range, flushIntervalMs }, auth, logger) {
     this.enabled = enabled;
-    this.clientEmail = clientEmail;
-    this.privateKey = privateKey;
+    this.auth = auth;
     this.spreadsheetId = spreadsheetId;
     this.range = range;
     this.flushIntervalMs = flushIntervalMs;
@@ -51,8 +48,6 @@ class SheetsExporter {
 
     /** @type {Array<Array<string|number>>} */
     this.queue = [];
-    this.accessToken = null;
-    this.accessTokenExpiry = 0;
     this.flushing = false;
     this.consecutiveFailures = 0;
     this.droppedRows = 0;
@@ -83,50 +78,6 @@ class SheetsExporter {
     this.queue.push(row);
   }
 
-  async #getAccessToken() {
-    const now = Math.floor(Date.now() / 1000);
-    // 60s safety margin so a token never expires mid-flight.
-    if (this.accessToken && now < this.accessTokenExpiry - 60) {
-      return this.accessToken;
-    }
-
-    const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-    const claims = base64url(
-      JSON.stringify({
-        iss: this.clientEmail,
-        scope: SCOPE,
-        aud: TOKEN_ENDPOINT,
-        iat: now,
-        exp: now + 3600,
-      })
-    );
-
-    const signer = crypto.createSign("RSA-SHA256");
-    signer.update(`${header}.${claims}`);
-    const signature = signer.sign(this.privateKey, "base64url");
-    const assertion = `${header}.${claims}.${signature}`;
-
-    const response = await fetch(TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        assertion,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`token exchange failed (${response.status}): ${detail.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
-    this.accessToken = data.access_token;
-    this.accessTokenExpiry = now + (data.expires_in || 3600);
-    return this.accessToken;
-  }
-
   async flush() {
     if (!this.enabled || this.flushing || this.queue.length === 0) return;
 
@@ -134,7 +85,7 @@ class SheetsExporter {
     const batch = this.queue.splice(0, MAX_BATCH_ROWS);
 
     try {
-      const token = await this.#getAccessToken();
+      const token = await this.auth.getAccessToken();
       const url =
         `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(this.spreadsheetId)}` +
         `/values/${encodeURIComponent(this.range)}:append` +
@@ -173,7 +124,7 @@ class SheetsExporter {
         );
       }
       // Token may be the problem — force a refresh next attempt.
-      this.accessToken = null;
+      this.auth.invalidate();
     } finally {
       this.flushing = false;
     }
@@ -187,6 +138,7 @@ class SheetsExporter {
       dropped: this.droppedRows,
       consecutiveFailures: this.consecutiveFailures,
       healthy: this.consecutiveFailures <= MAX_RETRIES,
+      auth: this.auth?.status?.() || null,
     };
   }
 

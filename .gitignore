@@ -13,6 +13,10 @@ __pycache__/
 *.pem
 *-service-account*.json
 
+# Deployment configuration — holds project/bucket names, and possibly a
+# SHEET_ID. Real secrets live in Google Secret Manager, not here.
+deploy.env
+
 # ── Biometric data (see docs/ENROLLMENT.md) ─────────────────────────
 # Student face images and derived embeddings are sensitive personal data
 # under the DPDP Act 2023. They live in encrypted private storage and are

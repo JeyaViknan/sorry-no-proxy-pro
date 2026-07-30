@@ -175,6 +175,7 @@ export default function App() {
       qrNode={qrNode}
       status={status}
       summary={summary}
+      token={token}
       onEnd={handleEnd}
     />
   );

@@ -22,6 +22,24 @@
 const TOKEN_STORAGE_KEY = "snp.facultyToken";
 const REFILL_MARGIN_MS = 20000;
 
+/**
+ * Backend origin.
+ *
+ * The faculty portal is deployed to Cloudflare Pages, a DIFFERENT origin from
+ * the Cloud Run backend, so relative "/api/..." paths would resolve against
+ * Pages and 404. VITE_API_BASE is baked in at build time.
+ *
+ * Empty (the default) means same-origin, which is what the Vite dev proxy
+ * gives us locally — so `npm run dev` needs no configuration at all.
+ *
+ * Trailing slashes are stripped so `https://host/` and `https://host` behave
+ * identically; a doubled slash is a genuinely confusing 404 to debug.
+ */
+const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+
+export const apiBase = () => API_BASE;
+export const apiUrl = (path) => `${API_BASE}${path}`;
+
 export class SessionError extends Error {
   constructor(code, message) {
     super(message);
@@ -38,7 +56,7 @@ async function call(path, { method = "GET", body, token, timeoutMs = 10000 } = {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(path, {
+    const response = await fetch(apiUrl(path), {
       method,
       headers: {
         ...(body ? { "Content-Type": "application/json" } : {}),
@@ -126,8 +144,35 @@ export async function endSession({ token, sessionId }) {
   return call(`/api/sessions/${sessionId}/end`, { method: "POST", token });
 }
 
-export function exportUrl(sessionId) {
-  return `/api/sessions/${sessionId}/export`;
+/**
+ * Download the attendance CSV.
+ *
+ * `<a href download>` cannot send an Authorization header, so pointing a link
+ * at /export simply produced a 401 — the download button never worked. Fetch
+ * it with the bearer token, then hand the browser an object URL.
+ */
+export async function downloadExport({ token, sessionId, label }) {
+  const response = await fetch(apiUrl(`/api/sessions/${sessionId}/export`), {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(20000),
+  });
+
+  if (!response.ok) {
+    throw new SessionError(`HTTP_${response.status}`, "Could not download the attendance file.");
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const safeLabel = (label || sessionId).replace(/[^\w-]+/g, "-").slice(0, 40);
+
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `attendance-${safeLabel}-${sessionId}.csv`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Revoking immediately can cancel the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 // ── Token buffer ─────────────────────────────────────────────────────
@@ -208,31 +253,6 @@ export class TokenBuffer {
 
 // ── Decoys ───────────────────────────────────────────────────────────
 
-const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-const BASE36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-function randomFrom(alphabet, length) {
-  const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
-  let output = "";
-  for (let i = 0; i < length; i += 1) output += alphabet[bytes[i] % alphabet.length];
-  return output;
-}
-
-/**
- * Build a decoy indistinguishable from a real payload.
- *
- * This matters more than it looks. The old decoys were ~90-character JSON
- * blobs next to a 22-character valid string, so the valid QR had visibly
- * fewer modules — a student could pick it out by eye without decoding
- * anything. Matching the exact length and alphabet means every code on screen
- * renders as the same QR version with the same visual density.
- *
- * The signature is random, so a decoy can never pass server verification.
- */
-export function makeDecoy(spec, sessionId) {
-  const sid = sessionId || randomFrom(BASE32, spec.sessionIdChars);
-  const slot = randomFrom(BASE36, spec.slotChars);
-  const signature = randomFrom(BASE32, spec.signatureChars);
-  return `${sid}.${slot}.${signature}`;
-}
+// Re-exported from a Vite-free module so scripts/decoy-check.mjs can import
+// the generator under plain Node. See lib/decoy.js.
+export { makeDecoy } from "./decoy.js";
