@@ -70,6 +70,7 @@ function errorHandler(err, req, res, next) {
       ok: false,
       code: err.code,
       message: err.message,
+      requestId: req.id,
       ...(err.details ? { details: err.details } : {}),
     });
   }
@@ -96,6 +97,10 @@ function errorHandler(err, req, res, next) {
     ok: false,
     code: "INTERNAL_ERROR",
     message: "Something went wrong on our side. Please try again.",
+    // The one piece of internal state worth exposing: it lets a student quote
+    // a reference that maps to exactly one log line, without revealing
+    // anything about what went wrong.
+    requestId: req.id,
   });
 }
 

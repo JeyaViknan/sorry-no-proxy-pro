@@ -14,6 +14,7 @@ const compression = require("compression");
 const { logger } = require("./logger");
 const { buildHelmet, buildCors, permissionsPolicy } = require("./middleware/security");
 const { globalLimiter } = require("./middleware/rateLimit");
+const { requestLog } = require("./middleware/requestLog");
 const { errorHandler, notFoundHandler } = require("./middleware/errors");
 const { FacultyAuth } = require("./middleware/auth");
 
@@ -63,6 +64,8 @@ function createApp({ config, faceVerifier }) {
   });
 
   // ── Middleware ────────────────────────────────────────────────────
+  // First, so every downstream log line and error response carries the id.
+  app.use(requestLog);
   app.use(buildHelmet());
   app.use(permissionsPolicy);
   app.use(compression());
@@ -82,16 +85,36 @@ function createApp({ config, faceVerifier }) {
   app.use(
     express.static(config.paths.publicDir, {
       index: "index.html",
-      // Hashed vendor assets can cache hard; HTML must not, so a fix reaches
-      // students immediately rather than after a cache expiry mid-semester.
+      etag: true,
+      lastModified: true,
       setHeaders(res, filePath) {
+        const name = path.basename(filePath);
+
         if (filePath.endsWith(".html")) {
+          // Always revalidate the entry point. It is ~2KB, so the cost is one
+          // conditional request that usually answers 304.
           res.setHeader("Cache-Control", "no-cache, must-revalidate");
-        } else if (/[.-][0-9a-f]{8,}\./i.test(path.basename(filePath))) {
-          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-        } else {
-          res.setHeader("Cache-Control", "public, max-age=3600");
+          return;
         }
+
+        // Content-hashed filenames can never change meaning — cache hard.
+        if (/[.-][0-9a-f]{8,}\./i.test(name)) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          return;
+        }
+
+        // Everything else (our unhashed CSS/JS, ~25KB gzipped in total).
+        //
+        // The previous `max-age=3600` meant a browser would not even ASK for
+        // an updated file for an hour — so a fix pushed mid-class could not
+        // reach the students in the room. This was not theoretical: it bit
+        // during review, serving a stale stylesheet while the server had the
+        // corrected one.
+        //
+        // `stale-while-revalidate` keeps loads instant (served from cache) but
+        // refreshes in the background, so a fix propagates on the next visit
+        // instead of after an hour.
+        res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=86400");
       },
     })
   );

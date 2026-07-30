@@ -32,6 +32,13 @@ const { logger } = require("../logger");
 
 const DATA_URI_PREFIX = /^data:image\/(jpeg|jpg|png|webp);base64,/;
 
+/**
+ * Separate, looser budget for unreadable photos. A student fighting bad
+ * lighting should get several tries; this exists only so a client cannot
+ * upload frames indefinitely.
+ */
+const QUALITY_ATTEMPT_CAP = 10;
+
 function createAttendanceRouter({ config, attendanceTokens, store, faceVerifier, sheets }) {
   const router = express.Router();
   const regnoPattern = new RegExp(config.attendance.registerNumberPattern);
@@ -125,11 +132,20 @@ function createAttendanceRouter({ config, attendanceTokens, store, faceVerifier,
     // ── 4. Attempt cap — the real brute-force control ───────────────
     const attempts = store.countAttempts(session, registerNumber);
     if (attempts >= config.attendance.maxAttempts) {
-      logger.warn("attempt cap reached", { sessionId: session.id, registerNumber });
+      logger.warn("identity attempt cap reached", { sessionId: session.id, registerNumber });
       return next(
         ApiError.forbidden(
           "TOO_MANY_ATTEMPTS",
           "Too many failed attempts. Please see your faculty member to be marked manually."
+        )
+      );
+    }
+    if (store.countQualityAttempts(session, registerNumber) >= QUALITY_ATTEMPT_CAP) {
+      logger.warn("quality attempt cap reached", { sessionId: session.id, registerNumber });
+      return next(
+        ApiError.forbidden(
+          "TOO_MANY_ATTEMPTS",
+          "We could not get a clear photo. Please see your faculty member to be marked manually."
         )
       );
     }
@@ -151,14 +167,32 @@ function createAttendanceRouter({ config, attendanceTokens, store, faceVerifier,
     }
 
     if (!verification.ok) {
-      store.incrementAttempts(session, registerNumber);
-      const remaining = Math.max(0, config.attendance.maxAttempts - attempts - 1);
+      // A QUALITY failure is not an identity claim — the photo was unreadable
+      // (motion blur, backlight, no face in frame). Counting it against the
+      // identity attempt budget means a student in bad lighting exhausts three
+      // attempts without the model ever having compared a usable face, and is
+      // then locked out of a class they are sitting in. Only genuine
+      // mismatches consume the budget; quality failures get their own, looser
+      // cap purely to bound abuse.
+      const isQualityFailure =
+        verification.reason === "QUALITY" || verification.reason === "NO_FACE";
+
+      let remaining;
+      if (isQualityFailure) {
+        const qualityAttempts = store.incrementQualityAttempts(session, registerNumber);
+        remaining = Math.max(0, QUALITY_ATTEMPT_CAP - qualityAttempts);
+      } else {
+        store.incrementAttempts(session, registerNumber);
+        remaining = Math.max(0, config.attendance.maxAttempts - attempts - 1);
+      }
 
       logger.info("verification rejected", {
         sessionId: session.id,
         registerNumber,
         reason: verification.reason,
+        qualityCode: verification.qualityCode,
         similarity: verification.similarity,
+        kind: isQualityFailure ? "quality" : "identity",
         attemptsRemaining: remaining,
       });
 

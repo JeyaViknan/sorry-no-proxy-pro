@@ -54,8 +54,10 @@ class SessionStore {
       endedAt: null,
       /** @type {Map<string, object>} registerNumber -> record */
       attendance: new Map(),
-      /** @type {Map<string, number>} registerNumber -> failed attempts */
+      /** @type {Map<string, number>} registerNumber -> failed IDENTITY attempts */
       attempts: new Map(),
+      /** @type {Map<string, number>} registerNumber -> unreadable-photo attempts */
+      qualityAttempts: new Map(),
     };
     this.sessions.set(id, session);
     return session;
@@ -129,6 +131,18 @@ class SessionStore {
   incrementAttempts(session, registerNumber) {
     const next = this.countAttempts(session, registerNumber) + 1;
     session.attempts.set(registerNumber, next);
+    return next;
+  }
+
+  // Quality failures are tracked separately so an unreadable photo never
+  // consumes the identity budget. See routes/attendance.js.
+  countQualityAttempts(session, registerNumber) {
+    return session.qualityAttempts.get(registerNumber) || 0;
+  }
+
+  incrementQualityAttempts(session, registerNumber) {
+    const next = this.countQualityAttempts(session, registerNumber) + 1;
+    session.qualityAttempts.set(registerNumber, next);
     return next;
   }
 

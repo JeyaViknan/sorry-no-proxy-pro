@@ -46,25 +46,24 @@ function createQrRouter({ qrTokens, attendanceTokens, store }) {
   router.post("/qr/validate", qrValidateLimiter, (req, res, next) => {
     const { payload, deviceId } = req.body || {};
 
+    // A missing device id is a client bug, not a scanning outcome — 4xx.
     if (typeof deviceId !== "string" || deviceId.length < 8 || deviceId.length > 128) {
       return next(
         ApiError.badRequest("DEVICE_ID_REQUIRED", "Your browser could not be identified.")
       );
     }
-    if (typeof payload !== "string" || payload.length > 128) {
-      return next(REJECTION.MALFORMED.keepScanning
-        ? ApiError.badRequest(REJECTION.MALFORMED.code, REJECTION.MALFORMED.message)
-        : ApiError.badRequest("QR_NOT_RECOGNISED", "Unrecognised code."));
-    }
 
-    const now = Date.now();
-    const result = qrTokens.verify(payload, now);
-
-    if (!result.ok) {
-      const rejection = REJECTION[result.reason] || REJECTION.MALFORMED;
-      // Deliberately 200, not 4xx: decoding a decoy is the *expected* state
-      // during scanning, not an error. Hundreds of these arrive per session
-      // and treating them as failures pollutes logs and client error paths.
+    /**
+     * Every payload-level rejection answers with HTTP 200 and `valid:false`.
+     *
+     * Consistency matters here: an over-long payload previously returned 400
+     * while a wrong-shaped one returned 200, so the client threw for one and
+     * resolved for the other despite both meaning "that is not a valid code,
+     * keep scanning". Decoding a decoy is the *expected* state during
+     * scanning, not a transport error, and hundreds arrive per session.
+     */
+    const reject = (reason) => {
+      const rejection = REJECTION[reason] || REJECTION.MALFORMED;
       return res.json({
         ok: false,
         valid: false,
@@ -72,7 +71,16 @@ function createQrRouter({ qrTokens, attendanceTokens, store }) {
         message: rejection.message,
         keepScanning: true,
       });
+    };
+
+    if (typeof payload !== "string" || payload.length > 128) {
+      return reject("MALFORMED");
     }
+
+    const now = Date.now();
+    const result = qrTokens.verify(payload, now);
+
+    if (!result.ok) return reject(result.reason);
 
     const session = store.getSession(result.sessionId, now);
     if (!session) {

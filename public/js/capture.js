@@ -142,6 +142,27 @@ function encodeFrame(video, rect) {
   return outputCanvas.toDataURL("image/jpeg", JPEG_QUALITY);
 }
 
+/**
+ * Resolve the source rectangle that the student is actually looking at.
+ *
+ * MUST be called while the capture screen is still VISIBLE.
+ * `getBoundingClientRect()` on a hidden element returns 0x0, which silently
+ * collapses `coverRect` to the full sensor frame — a completely different
+ * crop from the one the student framed. Capturing after switching screens
+ * therefore uploads the wrong region, which is exactly the sort of quiet
+ * accuracy loss that is impossible to diagnose from a rejection message.
+ * Callers compute this first and pass it through.
+ */
+export function computeCaptureRegion(camera) {
+  const { width, height } = camera.dimensions;
+  if (!camera.isLive || width === 0) return null;
+
+  const displayRect = camera.video.getBoundingClientRect();
+  if (!displayRect.width || !displayRect.height) return null;
+
+  return guideRect(coverRect(width, height, displayRect.width, displayRect.height));
+}
+
 /** Client-side gate. Catches the obvious cases before spending a round trip. */
 export function assessLiveFrame(camera) {
   const { width, height } = camera.dimensions;
@@ -149,9 +170,9 @@ export function assessLiveFrame(camera) {
     return { ok: false, code: "CAMERA_NOT_READY", message: "Starting camera…" };
   }
 
-  const displayRect = camera.video.getBoundingClientRect();
-  const visible = coverRect(width, height, displayRect.width, displayRect.height);
-  const rect = guideRect(visible);
+  const rect = computeCaptureRegion(camera);
+  if (!rect) return { ok: false, code: "CAMERA_NOT_READY", message: "Starting camera…" };
+
   const { variance, brightness } = scoreFrame(camera.video, rect);
 
   // Thresholds are on the 160px scoring canvas, deliberately loose: this is
@@ -169,86 +190,151 @@ export function assessLiveFrame(camera) {
 }
 
 /**
- * Capture a burst and return the best frames, sharpest first.
+ * Wait for the next painted frame, with a hard ceiling.
  *
- * Server-side matching takes the max similarity across frames, so ordering
- * matters: the verifier stops early on the first accept, which makes the
- * typical request one frame of work instead of three.
- *
- * @param {import("./camera.js").Camera} camera
- * @param {{ frames?: number, onProgress?: (n: number, total: number) => void }} options
+ * requestAnimationFrame never fires while the page is hidden (and is throttled
+ * to ~1Hz in some background states), so awaiting it bare can block forever.
+ * Every wait in the capture path is bounded.
  */
-export async function captureBurst(camera, { frames = 3, onProgress } = {}) {
-  const { width, height } = camera.dimensions;
-  if (!camera.isLive || width === 0) {
-    throw new Error("CAMERA_NOT_READY");
-  }
+function nextFrame(timeoutMs = 250) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    requestAnimationFrame(finish);
+    setTimeout(finish, timeoutMs);
+  });
+}
 
-  const displayRect = camera.video.getBoundingClientRect();
-  const visible = coverRect(width, height, displayRect.width, displayRect.height);
-  const rect = guideRect(visible);
+/** Retain one burst frame as a bitmap so it can be ranked, then encoded. */
+function grabFrame(video, rect) {
+  const aspect = rect.sh / rect.sw;
+  const width = Math.min(OUTPUT_MAX_EDGE, Math.round(rect.sw));
+  const height = Math.max(1, Math.round(width * aspect));
 
-  const candidates = [];
-  for (let i = 0; i < BURST_FRAMES; i += 1) {
-    // Align to the compositor so we sample distinct decoded frames rather
-    // than the same one several times.
-    await new Promise((resolve) => requestAnimationFrame(resolve));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas
+    .getContext("2d", { alpha: false })
+    .drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, width, height);
+  return canvas;
+}
 
-    const metrics = scoreFrame(camera.video, rect);
-    candidates.push({ index: i, ...metrics });
-    onProgress?.(i + 1, BURST_FRAMES);
+/** Score an already-captured canvas (not the live element). */
+function scoreCanvasFrame(source) {
+  const aspect = source.height / source.width;
+  scoreCanvas.width = SCORE_WIDTH;
+  scoreCanvas.height = Math.max(1, Math.round(SCORE_WIDTH * aspect));
+  scoreContext.drawImage(source, 0, 0, scoreCanvas.width, scoreCanvas.height);
+  return sharpness(scoreContext.getImageData(0, 0, scoreCanvas.width, scoreCanvas.height));
+}
 
-    if (i < BURST_FRAMES - 1) {
-      await new Promise((resolve) => setTimeout(resolve, BURST_INTERVAL_MS));
-    }
-  }
-
-  // Encoding is the expensive part, so rank first and encode only the winners.
-  candidates.sort((a, b) => b.variance - a.variance);
-  const keep = candidates.slice(0, Math.max(1, frames));
-
-  // The burst has finished; re-sampling now would capture a later moment.
-  // Encode from the frame currently on screen, which is the freeze the
-  // student is looking at, and reuse it for each kept slot. In practice the
-  // top frames are milliseconds apart, so this preserves the sharpest view
-  // while keeping the payload honest about what was on screen.
-  const encoded = [];
-  for (let i = 0; i < keep.length; i += 1) {
-    encoded.push(encodeFrame(camera.video, rect));
-    if (i < keep.length - 1) {
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-    }
-  }
-
-  return {
-    frames: encoded,
-    metrics: keep,
-    region: rect,
-    approxBytes: encoded.reduce((total, frame) => total + Math.floor(frame.length * 0.75), 0),
-  };
+/** Free a canvas's backing store immediately rather than waiting for GC. */
+function release(canvas) {
+  canvas.width = 0;
+  canvas.height = 0;
 }
 
 /**
- * Paint the captured frame into a visible canvas so the preview freezes.
+ * Capture a burst and return the sharpest frames, best first.
  *
- * The old flow set `display: none` on the whole container and left the
- * student staring at a blank screen for the 5-15 seconds verification took.
- * Showing the exact frame under evaluation makes the wait legible and makes
- * a bad capture self-evident.
+ * Server-side matching takes the max similarity across frames, and the
+ * verifier stops early on the first accept — so ordering makes the typical
+ * request one frame of work instead of three.
+ *
+ * Each frame is RETAINED as it is captured, then ranked, then only the
+ * winners are encoded. An earlier version scored the burst and afterwards
+ * encoded whatever happened to be on screen, which made the whole selection
+ * a no-op and sent several near-identical frames — the exact opposite of the
+ * diversity a burst is supposed to provide.
+ *
+ * @param {import("./camera.js").Camera} camera
+ * @param {{ frames?: number, region?: object, onProgress?: (n: number, total: number) => void }} options
  */
-export function freezeInto(canvas, camera) {
-  const { width, height } = camera.dimensions;
-  if (width === 0) return false;
+export async function captureBurst(camera, { frames = 3, region = null, onProgress } = {}) {
+  if (!camera.isLive || camera.dimensions.width === 0) {
+    throw new Error("CAMERA_NOT_READY");
+  }
 
-  const displayRect = camera.video.getBoundingClientRect();
-  const visible = coverRect(width, height, displayRect.width, displayRect.height);
-  const rect = guideRect(visible);
+  // Prefer the region resolved while the preview was on screen.
+  const rect = region || computeCaptureRegion(camera);
+  if (!rect) throw new Error("CAMERA_NOT_READY");
 
-  const aspect = rect.sh / rect.sw;
-  canvas.width = Math.min(OUTPUT_MAX_EDGE, Math.round(rect.sw));
-  canvas.height = Math.max(1, Math.round(canvas.width * aspect));
+  const captured = [];
+  try {
+    for (let i = 0; i < BURST_FRAMES; i += 1) {
+      // Align to the compositor so we sample distinct decoded frames rather
+      // than the same one several times — but never BLOCK on it. Browsers
+      // suspend requestAnimationFrame while a page is hidden, so a student
+      // who switches apps mid-capture would otherwise hang on "Capturing…"
+      // forever with no timeout anywhere in the chain.
+      await nextFrame();
 
-  const context = canvas.getContext("2d", { alpha: false });
-  context.drawImage(camera.video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, canvas.width, canvas.height);
+      // If the page went away, stop rather than collecting stale frames: the
+      // element holds whatever was last decoded, which may be seconds old.
+      if (document.hidden) {
+        if (captured.length === 0) throw new Error("CAPTURE_INTERRUPTED");
+        break;
+      }
+
+      const canvas = grabFrame(camera.video, rect);
+      captured.push({ index: i, canvas, ...scoreCanvasFrame(canvas) });
+      onProgress?.(i + 1, BURST_FRAMES);
+
+      if (i < BURST_FRAMES - 1) {
+        await new Promise((resolve) => setTimeout(resolve, BURST_INTERVAL_MS));
+      }
+    }
+
+    captured.sort((a, b) => b.variance - a.variance);
+    const keep = captured.slice(0, Math.max(1, frames));
+
+    // Encoding is the expensive step, so only the winners pay it.
+    const encoded = keep.map((frame) => frame.canvas.toDataURL("image/jpeg", JPEG_QUALITY));
+
+    return {
+      frames: encoded,
+      // The sharpest frame, kept alive for the freeze preview so the student
+      // sees the image actually being evaluated.
+      best: keep[0].canvas,
+      metrics: keep.map(({ index, variance, brightness }) => ({ index, variance, brightness })),
+      region: rect,
+      approxBytes: encoded.reduce((total, frame) => total + Math.floor(frame.length * 0.75), 0),
+    };
+  } finally {
+    // Release every frame except the one handed back for display.
+    const winner = captured.length
+      ? captured.slice().sort((a, b) => b.variance - a.variance)[0].canvas
+      : null;
+    for (const frame of captured) {
+      if (frame.canvas !== winner) release(frame.canvas);
+    }
+  }
+}
+
+/**
+ * Show the frame that is actually being verified.
+ *
+ * Takes the winning burst canvas rather than re-sampling the camera, so the
+ * student sees precisely the image the server is judging. The old flow set
+ * `display: none` on everything and left them staring at a blank screen for
+ * the 5-15 seconds verification took.
+ *
+ * @param {HTMLCanvasElement} canvas destination, on screen
+ * @param {HTMLCanvasElement} source the `best` canvas from captureBurst
+ */
+export function showFrozenFrame(canvas, source) {
+  if (!source || !source.width) return false;
+
+  canvas.width = source.width;
+  canvas.height = source.height;
+  canvas.getContext("2d", { alpha: false }).drawImage(source, 0, 0);
+
+  // The winner is no longer needed once it is on screen.
+  release(source);
   return true;
 }

@@ -18,8 +18,13 @@ import * as api from "./api.js";
 import * as store from "./storage.js";
 import * as ui from "./ui.js";
 import { Camera, CameraError, checkSupport, watchVisibility } from "./camera.js";
-import { QrScanner, looksLikeAttendancePayload } from "./scanner.js";
-import { assessLiveFrame, captureBurst, freezeInto } from "./capture.js";
+import { QrScanner, looksLikeAttendancePayload, warmScannerBackend } from "./scanner.js";
+import {
+  assessLiveFrame,
+  captureBurst,
+  computeCaptureRegion,
+  showFrozenFrame,
+} from "./capture.js";
 
 const REGNO_PATTERN = /^[0-9]{2}[A-Z]{3}[0-9]{4}$/;
 const QUALITY_POLL_MS = 350;
@@ -40,6 +45,11 @@ const state = {
   // Payloads already rejected this session. The display shows mostly decoys,
   // and without this the same one would be re-sent every frame.
   rejectedPayloads: new Set(),
+  // Backoff counter. If the faculty display's token buffer runs dry it shows
+  // decoys continuously; without this every phone in the room would POST one
+  // every ~400ms, amplifying the very outage that caused it.
+  consecutiveInvalid: 0,
+  backoffUntil: 0,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -89,6 +99,9 @@ function initIntro() {
   // Warm DNS/TCP/TLS and learn the server clock while the student is still
   // reading the intro. Entirely off the critical path.
   api.prefetchHello();
+  // On browsers without BarcodeDetector this downloads the 368KB decoder now,
+  // overlapping it with reading time instead of with "Starting camera…".
+  warmScannerBackend();
 
   const saved = store.getRegisterNumber();
   if (saved) {
@@ -113,10 +126,19 @@ async function startScanning() {
     state.camera = new Camera(ui.$("#scan-video"));
     state.camera.onInterrupted = () => {
       ui.showBanner("The camera stopped. Reopening…", { tone: "warn" });
-      state.camera.switchTo(state.camera.facingMode || "environment").catch(() => {});
+      const facing = state.camera.facingMode || "environment";
+      state.camera
+        .switchTo(facing, {
+          video: facing === "user" ? ui.$("#capture-video") : ui.$("#scan-video"),
+        })
+        .catch(() => {});
     };
 
-    await state.camera.start("environment", { width: 1280, height: 720 });
+    await state.camera.start("environment", {
+      width: 1280,
+      height: 720,
+      video: ui.$("#scan-video"),
+    });
 
     state.stopVisibilityWatch = watchVisibility(state.camera, {
       onLost: () => ui.showBanner("Reconnecting to the camera…", { tone: "warn" }),
@@ -146,6 +168,7 @@ async function onDecoded(text) {
   if (state.inFlight) return;
   if (!looksLikeAttendancePayload(text)) return; // some unrelated QR
   if (state.rejectedPayloads.has(text)) return; // already ruled out
+  if (api.serverNow() < state.backoffUntil) return;
 
   state.inFlight = true;
   try {
@@ -156,10 +179,22 @@ async function onDecoded(text) {
     });
 
     if (!result.valid) {
+      state.consecutiveInvalid += 1;
+      // Normally the display shows a currently-valid code, so the first scan
+      // succeeds. A long run of invalid results means the faculty token
+      // buffer has run dry — i.e. the server is already struggling. Backing
+      // off stops several hundred phones hammering it every ~400ms and
+      // amplifying the outage.
+      if (state.consecutiveInvalid >= 5) {
+        const wait = Math.min(1000 * 2 ** (state.consecutiveInvalid - 5), 15000);
+        state.backoffUntil = api.serverNow() + wait;
+        ui.setScanStatus("Waiting for the next code…", "warn");
+      }
       // Expected for a decoy. Remember it so we never spend another request
       // on the same string, and say nothing to the student — showing
       // "Invalid QR" hundreds of times per session, as the old UI did, only
       // teaches them to distrust the app.
+      if (state.rejectedPayloads.size > 500) state.rejectedPayloads.clear();
       state.rejectedPayloads.add(text);
       if (result.code === "SESSION_ENDED") {
         state.scanner.stop();
@@ -173,6 +208,8 @@ async function onDecoded(text) {
       return;
     }
 
+    state.consecutiveInvalid = 0;
+    state.backoffUntil = 0;
     state.attendanceToken = result.attendanceToken;
     state.tokenExpiresAt = result.expiresAt;
     state.session = result.session;
@@ -206,7 +243,14 @@ async function goToCapture() {
   try {
     // One camera owner, so this is a plain awaited switch — no cross-library
     // contention, which is what made the old handoff fail unpredictably.
-    await state.camera.switchTo("user", { width: 1280, height: 720 });
+    // Re-bind to the capture screen's own <video>. Without the explicit
+    // element the stream stays attached to the (now hidden) scan element and
+    // this screen renders black.
+    await state.camera.switchTo("user", {
+      width: 1280,
+      height: 720,
+      video: ui.$("#capture-video"),
+    });
     // Mirror the preview: people expect a selfie view to behave like a mirror.
     ui.$("#capture-video").classList.add("mirrored");
   } catch (error) {
@@ -239,11 +283,10 @@ function startQualityPolling() {
 
     ui.setCameraHint(assessment.message, assessment.ok ? "success" : "warn");
     ui.$("#face-guide").dataset.state = assessment.ok ? "ready" : "adjust";
-    validateRegnoInput(assessment.ok);
   }, QUALITY_POLL_MS);
 }
 
-function validateRegnoInput(cameraOk = null) {
+function validateRegnoInput() {
   const input = ui.$("#regno-input");
   const value = input.value.trim().toUpperCase();
   const valid = REGNO_PATTERN.test(value);
@@ -271,7 +314,6 @@ async function submit() {
   }
 
   const registerNumber = ui.$("#regno-input").value.trim().toUpperCase();
-  store.setRegisterNumber(registerNumber);
 
   // Token may have expired while the student typed.
   if (!tokenIsUsable()) {
@@ -280,20 +322,38 @@ async function submit() {
     return;
   }
 
+  // Geometry MUST be resolved while the capture screen is still visible —
+  // getBoundingClientRect() on a hidden element is 0x0, which silently
+  // collapses the crop to the full sensor frame and uploads a region the
+  // student never framed.
+  const region = computeCaptureRegion(state.camera);
+  if (!region) {
+    ui.showBanner("The camera is not ready yet. Give it a moment.", { tone: "warn" });
+    return;
+  }
+
   stopQualityPolling();
-  ui.showScreen("verify");
-  ui.setProgress("Capturing…");
+  ui.setSubmitEnabled(false);
+  ui.setCameraHint("Hold still…", "neutral");
 
   try {
-    // Freeze first, so the student sees the exact frame being evaluated
-    // rather than the blank screen the old flow showed for 5-15 seconds.
-    freezeInto(ui.$("#freeze-canvas"), state.camera);
-
+    // Capture while the preview is still on screen, so the student is looking
+    // at the camera for the whole burst rather than at a transition.
     const profile = api.connectionProfile();
     const burst = await captureBurst(state.camera, {
       frames: profile.frames,
-      onProgress: (n, total) => ui.setProgress(`Capturing… ${n}/${total}`),
+      region,
+      onProgress: (n, total) => ui.setCameraHint(`Capturing ${n}/${total}…`, "neutral"),
     });
+
+    // Now switch, showing the exact frame being judged.
+    ui.showScreen("verify");
+    // The live preview is mirrored (people expect a selfie to behave like a
+    // mirror), so mirror the freeze too — otherwise the student's face
+    // visibly flips at the moment of capture, which reads as a glitch. Only
+    // the DISPLAY is flipped; the uploaded pixels stay unmirrored.
+    ui.$("#freeze-canvas").classList.add("mirrored");
+    showFrozenFrame(ui.$("#freeze-canvas"), burst.best);
 
     // The camera has done its job; release it before the network wait so the
     // sensor is not held open during a slow upload.
@@ -312,6 +372,17 @@ async function submit() {
         ui.setProgress(`Network is slow — retrying (${attempt}/${of})…`),
     });
 
+    // A face mismatch is returned as HTTP 200 with ok:false, because it is a
+    // legitimate answer rather than a transport failure. api.js therefore
+    // resolves rather than throws, so this branch is REQUIRED — without it a
+    // rejected student is shown "You are marked present", which defeats the
+    // entire system. Automated tests missed this because the verifier returns
+    // 503 (which does throw) when no model is loaded.
+    if (result.ok === false || result.status === "rejected") {
+      showRejection(result, registerNumber);
+      return;
+    }
+
     showSuccess(result, registerNumber);
   } catch (error) {
     handleSubmitError(error, registerNumber);
@@ -319,6 +390,9 @@ async function submit() {
 }
 
 function showSuccess(result, registerNumber) {
+  // Only the register number is persisted, and only now that it has been
+  // confirmed against a real face. Saving it earlier would remember a typo.
+  store.setRegisterNumber(registerNumber);
   ui.vibrate([40, 60, 40]);
 
   const flagged = result.status === "flagged";
@@ -328,9 +402,45 @@ function showSuccess(result, registerNumber) {
       ? `${registerNumber} — recorded, and flagged for your faculty member to confirm.`
       : `${registerNumber} — ${state.session?.label || "attendance recorded"}.`,
     tone: flagged ? "warn" : "success",
-    actions: [{ label: "Done", primary: true, onClick: () => window.close() }],
+    // window.close() only works for script-opened windows, so it silently does
+    // nothing here. Reloading back to the start is honest and actually useful
+    // on a shared device.
+    actions: [{ label: "Done", primary: true, onClick: () => location.reload() }],
   });
   teardown();
+}
+
+/**
+ * A verification that completed and said no.
+ *
+ * Distinguishes "we could not read the photo" from "that is not you": the
+ * first is recoverable in two seconds by moving into better light, the second
+ * is not. Collapsing them, as the old build did, is why legitimate students
+ * were told to go and speak to the professor.
+ */
+function showRejection(result, registerNumber) {
+  ui.vibrate(200);
+
+  const isQuality = result.code === "QUALITY" || result.code === "NO_FACE";
+  const remaining = result.attemptsRemaining;
+  const canRetry = result.canRetry !== false;
+
+  const suffix =
+    canRetry && typeof remaining === "number" && remaining > 0
+      ? ` (${remaining} attempt${remaining === 1 ? "" : "s"} left)`
+      : "";
+
+  ui.showResult({
+    title: isQuality ? "Could not read your face" : "That does not match",
+    detail: `${result.message || "Please try again."}${suffix}`,
+    tone: "warn",
+    actions: canRetry
+      ? [
+          { label: "Try again", primary: true, onClick: () => retryCapture(registerNumber) },
+          { label: "Start over", onClick: () => location.reload() },
+        ]
+      : [{ label: "Start over", primary: true, onClick: () => location.reload() }],
+  });
 }
 
 /**
@@ -346,23 +456,39 @@ function showSuccess(result, registerNumber) {
 async function handleSubmitError(error, registerNumber) {
   const payload = error.payload || {};
 
-  // A rejection the student can act on.
-  if (payload.status === "rejected" || error.status === 200) {
-    const canRetry = payload.canRetry !== false;
+  if (error.message === "CAPTURE_INTERRUPTED") {
     ui.showResult({
-      title: payload.code === "QUALITY" ? "Could not read your face" : "Face did not match",
-      detail:
-        payload.message +
-        (canRetry && payload.attemptsRemaining
-          ? ` (${payload.attemptsRemaining} attempt${payload.attemptsRemaining === 1 ? "" : "s"} left)`
-          : ""),
+      title: "Capture interrupted",
+      detail: "The app was closed or backgrounded mid-photo. Nothing was submitted — try again.",
       tone: "warn",
-      actions: canRetry
-        ? [
-            { label: "Try again", primary: true, onClick: () => retryCapture(registerNumber) },
-            { label: "Start over", onClick: () => location.reload() },
-          ]
-        : [{ label: "Start over", primary: true, onClick: () => location.reload() }],
+      actions: [
+        { label: "Try again", primary: true, onClick: () => retryCapture(registerNumber) },
+        { label: "Start over", onClick: () => location.reload() },
+      ],
+    });
+    return;
+  }
+
+  if (error.message === "CAMERA_NOT_READY") {
+    ui.showResult({
+      title: "Camera not ready",
+      detail: "The camera stopped before the photo was taken. Try again.",
+      tone: "warn",
+      actions: [
+        { label: "Try again", primary: true, onClick: () => retryCapture(registerNumber) },
+        { label: "Start over", onClick: () => location.reload() },
+      ],
+    });
+    return;
+  }
+
+  // The attempt cap is enforced server-side and arrives as 403.
+  if (error.code === "TOO_MANY_ATTEMPTS") {
+    ui.showResult({
+      title: "Too many attempts",
+      detail: payload.message || error.message,
+      tone: "error",
+      actions: [{ label: "Start over", primary: true, onClick: () => location.reload() }],
     });
     return;
   }
@@ -411,7 +537,11 @@ async function retryCapture(registerNumber) {
   ui.$("#regno-input").value = registerNumber;
 
   try {
-    await state.camera.start("user", { width: 1280, height: 720 });
+    await state.camera.start("user", {
+      width: 1280,
+      height: 720,
+      video: ui.$("#capture-video"),
+    });
     startQualityPolling();
     validateRegnoInput();
   } catch (error) {
@@ -423,12 +553,18 @@ async function returnToScanning() {
   state.attendanceToken = null;
   state.tokenExpiresAt = 0;
   state.rejectedPayloads.clear();
+  state.consecutiveInvalid = 0;
+  state.backoffUntil = 0;
 
   ui.showScreen("scan");
   ui.setScanStatus("Point at the screen at the front of the room");
 
   try {
-    await state.camera.switchTo("environment", { width: 1280, height: 720 });
+    await state.camera.switchTo("environment", {
+      width: 1280,
+      height: 720,
+      video: ui.$("#scan-video"),
+    });
     if (!state.scanner) {
       state.scanner = new QrScanner();
       await state.scanner.prepare();

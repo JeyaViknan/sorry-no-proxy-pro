@@ -61,9 +61,19 @@ const qrValidateLimiter = rateLimit({
   ),
 });
 
+/**
+ * Must sit ABOVE the server-side attempt budgets, never below them.
+ *
+ * The quality budget allows 10 unreadable-photo retries and the identity
+ * budget 3 mismatches. At the previous limit of 10/min a student fighting bad
+ * lighting hit a bare 429 before the purpose-built cap ever applied — the
+ * rate limiter, which exists to bound abuse, was silently doing the job of a
+ * control designed to be helpful. Whenever those budgets change, this must
+ * stay comfortably clear of their sum.
+ */
 const attendanceLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 10,
+  limit: 25,
   keyGenerator: deviceKey,
   standardHeaders: "draft-7",
   legacyHeaders: false,
@@ -74,13 +84,26 @@ const attendanceLimiter = rateLimit({
 });
 
 /**
- * Backstop. 1200/min tolerates ~500 students each making a couple of requests
- * inside the same minute from one NAT, with headroom. It still caps a script
- * that would otherwise fill the verification queue.
+ * Backstop, sized from the actual per-student request budget.
+ *
+ * A student makes roughly: 1 x /api/hello, 1-2 x /api/qr/validate,
+ * 1 x /api/attendance, plus a retry or two on a bad connection -> ~5 requests.
+ * The whole class arrives inside a 2-3 minute window, from ONE NAT'd IP.
+ *
+ *     500 students  x 5 =  2,500 requests
+ *   2,000 students  x 5 = 10,000 requests
+ *
+ * The previous value of 1200/min would therefore have rate-limited a normal
+ * 500-student class part way through — turning a security control into an
+ * outage, which is the single easiest way to break this system in production.
+ *
+ * Default 6000/min covers 500 students comfortably even if they all arrive in
+ * the same minute. Raise RATE_LIMIT_GLOBAL_PER_MIN for larger cohorts; the
+ * per-device limiters above remain the real fairness control.
  */
 const globalLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 1200,
+  limit: Number(process.env.RATE_LIMIT_GLOBAL_PER_MIN) || 6000,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   skip: (req) => req.path === "/healthz" || req.path === "/api/health",

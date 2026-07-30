@@ -14,7 +14,7 @@
     "dev": "node --watch server/index.js",
     "build:gallery": "python3 python/build_gallery.py",
     "verify:gallery": "python3 python/verify_gallery.py",
-    "test": "node --test server/**/*.test.js"
+    "test": "node --test server/services/*.test.js server/routes/*.test.js"
   },
   "dependencies": {
     "compression": "^1.8.1",

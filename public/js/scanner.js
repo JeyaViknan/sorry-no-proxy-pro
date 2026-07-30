@@ -96,6 +96,25 @@ function canvasToFile() {
   });
 }
 
+/**
+ * Kick off the fallback download early, on browsers that will need it.
+ *
+ * `prepare()` is awaited during camera startup, so on iOS the student was
+ * watching "Starting camera…" for the length of a 368KB download on lecture
+ * wifi. Calling this from the intro screen overlaps that with reading time
+ * and a user's thumb travelling to the button. No-op where BarcodeDetector
+ * exists, which is most of Android.
+ */
+export async function warmScannerBackend() {
+  if (await createNativeDetector()) return "native";
+  try {
+    await loadFallbackLibrary();
+    return "fallback";
+  } catch {
+    return "deferred"; // prepare() will retry and surface the error properly
+  }
+}
+
 export class QrScanner {
   constructor() {
     this.running = false;

@@ -158,21 +158,37 @@ export function vibrate(pattern) {
  * scanning, which is exactly when the display times out and the stream stops.
  */
 export async function acquireWakeLock() {
-  try {
-    if (!("wakeLock" in navigator)) return null;
-    const sentinel = await navigator.wakeLock.request("screen");
-    // Re-acquire after backgrounding, or it stays released.
-    document.addEventListener("visibilitychange", async () => {
-      if (document.visibilityState === "visible" && sentinel.released) {
-        try {
-          await navigator.wakeLock.request("screen");
-        } catch {
-          /* best effort */
-        }
+  if (!("wakeLock" in navigator)) return null;
+
+  // The sentinel is replaced on every re-acquire. Closing over the FIRST one
+  // meant `.released` was checked against a stale object, so the lock was
+  // never actually re-taken after the second backgrounding.
+  let current = null;
+
+  const acquire = async () => {
+    try {
+      current = await navigator.wakeLock.request("screen");
+    } catch {
+      current = null; // denied, or the document is not visible yet
+    }
+  };
+
+  await acquire();
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && (!current || current.released)) {
+      acquire();
+    }
+  });
+
+  return {
+    release: async () => {
+      try {
+        await current?.release();
+      } catch {
+        /* already released */
       }
-    });
-    return sentinel;
-  } catch {
-    return null;
-  }
+      current = null;
+    },
+  };
 }

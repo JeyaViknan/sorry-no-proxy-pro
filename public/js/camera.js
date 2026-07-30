@@ -167,11 +167,42 @@ function waitForFrames(video, timeoutMs = READY_TIMEOUT_MS) {
  */
 export class Camera {
   constructor(videoElement) {
-    this.video = videoElement;
+    this.video = null;
     this.stream = null;
     this.facingMode = null;
     this.onInterrupted = null;
+    this.bindTo(videoElement);
+  }
+
+  /**
+   * Point this camera at a different <video> element.
+   *
+   * Each screen has its own element (a scan viewport with a QR frame, a
+   * capture viewport with a face guide), so switching screens must re-bind or
+   * the stream stays attached to the element that is now hidden. Without
+   * this, `switchTo("user")` put the front camera on the SCAN element and the
+   * capture screen rendered a black box — with the knock-on effect that
+   * `getBoundingClientRect()` on the hidden element returned 0x0 and the
+   * crop geometry collapsed.
+   *
+   * Detaches the previous element first so two elements never claim one stream.
+   */
+  bindTo(videoElement) {
+    if (this.video === videoElement) return;
+
+    if (this.video) {
+      this.video.srcObject = null;
+    }
+    this.video = videoElement;
     this.#prepareElement();
+
+    // Carry a live stream across to the new element.
+    if (this.stream) {
+      this.video.srcObject = this.stream;
+      this.video.play().catch(() => {
+        /* surfaced by the caller's readiness check */
+      });
+    }
   }
 
   #prepareElement() {
@@ -202,7 +233,9 @@ export class Camera {
    * and Firefox Mobile deny or mis-handle an unprompted request, which is why
    * the old `window.addEventListener("load", initializeScanner)` was unreliable.
    */
-  async start(facingMode = "environment", { width = 1280, height = 720 } = {}) {
+  async start(facingMode = "environment", { width = 1280, height = 720, video = null } = {}) {
+    if (video) this.bindTo(video);
+
     const support = checkSupport();
     if (!support.supported) {
       throw new CameraError(support.code, support.message);
@@ -287,8 +320,11 @@ export class Camera {
    * Switch facing mode with a fully-awaited teardown.
    * This is the fix for the rear-to-front handoff race.
    */
-  async switchTo(facingMode, options) {
+  async switchTo(facingMode, options = {}) {
     await this.stop();
+    // Re-bind BEFORE acquiring, so the stream lands on the element that is
+    // about to be visible rather than the one being left behind.
+    if (options.video) this.bindTo(options.video);
     // Give the OS a moment to actually release the sensor. Without this,
     // Samsung Internet and several Android builds reject the next
     // getUserMedia with NotReadableError.
