@@ -1,4 +1,17 @@
-numpy>=1.23.0,<2
+# Face verification runtime.
+#
+# numpy is pinned below 2.0 because onnxruntime's published wheels are built
+# against the 1.x ABI; mixing them produces import-time crashes that look like
+# unrelated failures.
+numpy>=1.24.0,<2
+
+# Headless build — the full opencv-python pulls GUI/X11 libraries that a
+# container will never use and that add ~200MB to the image.
 opencv-python-headless==4.10.0.84
+
 insightface==0.7.3
-onnxruntime>=1.18.1
+
+# Upper bound is deliberate. onnxruntime changes opset handling between minor
+# versions; an unpinned upgrade could silently alter embeddings and invalidate
+# the entire gallery with no error anywhere.
+onnxruntime>=1.18.1,<2
