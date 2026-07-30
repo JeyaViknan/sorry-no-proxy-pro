@@ -148,8 +148,22 @@ const attendanceTokenTtlMs = integer("ATTENDANCE_TOKEN_TTL_MS", 120000, {
 });
 
 // ── Face verification ───────────────────────────────────────────────
-const faceThresholdAccept = decimal("FACE_THRESHOLD_ACCEPT", 0.5, { min: 0.1, max: 0.99 });
-const faceThresholdReview = decimal("FACE_THRESHOLD_REVIEW", 0.42, { min: 0.1, max: 0.99 });
+// DEFAULTS ARE 0.55 / 0.45, NOT the 0.50 / 0.42 this shipped with.
+//
+// 0.50 was never calibrated — it was inherited from a paper about a different
+// dataset. Measured against the actual 67-student gallery, two students
+// (25BRS1169 and 25BRS1286) score 0.5016 against each other, which at 0.50
+// means each can mark the other present. That is a live false accept: the
+// precise failure this system exists to prevent.
+//
+// 0.55 yields zero colliding pairs in that gallery. A default has to be SAFE
+// when nobody sets the variable, so the safe value is the default.
+//
+// TODO(enrollment): replace both with the output of `npm run verify:gallery`
+// once multi-image enrollment data exists — it can then measure false
+// REJECTIONS too, which impostor data alone cannot.
+const faceThresholdAccept = decimal("FACE_THRESHOLD_ACCEPT", 0.55, { min: 0.1, max: 0.99 });
+const faceThresholdReview = decimal("FACE_THRESHOLD_REVIEW", 0.45, { min: 0.1, max: 0.99 });
 if (faceThresholdReview > faceThresholdAccept) {
   errors.push(
     `FACE_THRESHOLD_REVIEW (${faceThresholdReview}) must be <= ` +

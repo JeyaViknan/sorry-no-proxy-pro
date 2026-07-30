@@ -97,8 +97,13 @@ class PipelineConfig:
     # anywhere, so gallery.py refuses to load on a mismatch.
     embedding_dim: int = 512
 
-    threshold_accept: float = 0.50
-    threshold_review: float = 0.42
+    # 0.55 / 0.45, not 0.50 / 0.42. In the real 67-student gallery,
+    # 25BRS1169 and 25BRS1286 score 0.5016 against each other — at 0.50 they
+    # can verify as one another. Defaults must be safe when unset.
+    # Node always passes explicit values; these matter for build_gallery.py,
+    # verify_gallery.py and anyone running the worker standalone.
+    threshold_accept: float = 0.55
+    threshold_review: float = 0.45
 
     max_frames: int = 3
 

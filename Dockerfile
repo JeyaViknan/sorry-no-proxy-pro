@@ -66,8 +66,21 @@ app = FaceAnalysis(name='buffalo_l', allowed_modules=['detection','recognition']
 app.prepare(ctx_id=-1); \
 print('buffalo_l cached')"
 
-# Fail the build here rather than at 9am in a lecture hall.
-RUN /opt/venv/bin/python -c "import cv2, numpy, onnxruntime, insightface; print('python runtime OK')"
+# buffalo_l ships five models; the verifier loads only detection (det_10g) and
+# recognition (w600k_r50) — see engine.py's allowed_modules. Dropping the three
+# never touched removes ~150MB from the image, and therefore from every
+# cold-start image pull.
+RUN cd "${INSIGHTFACE_HOME}/models/buffalo_l" && \
+    rm -f 1k3d68.onnx 2d106det.onnx genderage.onnx && \
+    echo "kept:" && ls -1
+
+# Fail the build here rather than at 9am in a lecture hall. Loading the app
+# again also proves the pruning above did not remove something needed.
+RUN /opt/venv/bin/python -c "\
+from insightface.app import FaceAnalysis; \
+app = FaceAnalysis(name='buffalo_l', allowed_modules=['detection','recognition'], root='/opt/insightface'); \
+app.prepare(ctx_id=-1); \
+print('python runtime OK after pruning')"
 
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────

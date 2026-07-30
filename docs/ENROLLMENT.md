@@ -57,9 +57,11 @@ failures observed in class.
 photographs, before any camera degradation. Those two students can currently
 mark each other present.
 
-Interim mitigation until re-enrollment: raise `FACE_THRESHOLD_ACCEPT` to
-`0.55` (zero colliding pairs in the current gallery) and accept a higher
-false-rejection rate, which the review band absorbs.
+This is already mitigated: **0.55 is the default everywhere**, giving zero
+colliding pairs in the current gallery, at the cost of a higher
+false-rejection rate that the review band absorbs. A regression test
+(`test_default_threshold_admits_no_known_impostor_pair`) fails the build
+if a future gallery introduces a pair the configured threshold would admit.
 
 ---
 

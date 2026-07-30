@@ -248,7 +248,7 @@ print('converted')
 
 ### Set your threshold
 
-`deploy.env` ships with `FACE_THRESHOLD_ACCEPT=0.55`, not the old `0.50`.
+The default is now `FACE_THRESHOLD_ACCEPT=0.55` — in `deploy.env`, in `.env.example`, and as the built-in fallback in both `server/config.js` and `python/face_pipeline/config.py`.
 
 **This is deliberate.** In the existing 67-student gallery, `25BRS1169` and
 `25BRS1286` score **0.5016** against each other — above 0.50, meaning those two

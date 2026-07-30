@@ -447,6 +447,53 @@ class TestRealGalleryIfPresent(unittest.TestCase):
         self.assertEqual(loaded.embeddings.shape[1], config.embedding_dim)
         print(f"\n    [real gallery] {loaded.summary()}")
 
+    def test_default_threshold_admits_no_known_impostor_pair(self):
+        """The default must be SAFE, not merely conventional.
+
+        This is the check that would have caught the shipped 0.50: in this
+        gallery 25BRS1169 and 25BRS1286 score 0.5016 against each other, so
+        0.50 let each of them mark the other present — a live false accept,
+        the exact failure the system exists to prevent.
+
+        Asserted against the REAL gallery rather than synthetic vectors,
+        because the whole point is that a plausible-looking constant was
+        wrong for this specific cohort. If a future re-enrollment introduces
+        a closer pair, this fails and forces a recalibration instead of
+        quietly degrading.
+        """
+        config = PipelineConfig.from_env()
+        if not (config.gallery_dir / "face_db.npz").exists() and not (
+            config.gallery_dir / "face_db.pkl"
+        ).exists():
+            self.skipTest("no gallery present")
+
+        loaded = gallery_module.load(config)
+        if loaded.identity_count < 2:
+            self.skipTest("need at least two identities to have impostor pairs")
+
+        similarity = loaded.embeddings @ loaded.embeddings.T
+        different_identity = loaded.owners[:, None] != loaded.owners[None, :]
+        upper = np.triu(np.ones_like(similarity, dtype=bool), k=1)
+        impostor = similarity[different_identity & upper]
+
+        worst = float(impostor.max())
+        colliding = int((impostor >= config.threshold_accept).sum())
+
+        print(
+            f"\n    [threshold] accept={config.threshold_accept} "
+            f"worst_impostor={worst:.4f} colliding_pairs={colliding}"
+        )
+
+        self.assertEqual(
+            colliding,
+            0,
+            f"{colliding} pair(s) of DIFFERENT students score >= the accept "
+            f"threshold {config.threshold_accept} (worst {worst:.4f}). Each such "
+            f"pair can verify as the other. Raise FACE_THRESHOLD_ACCEPT above "
+            f"{worst:.4f}, or re-enroll those students with more images. "
+            f"Run `npm run verify:gallery` to see which pairs.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
