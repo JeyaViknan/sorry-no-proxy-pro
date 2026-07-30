@@ -1,0 +1,199 @@
+/* ── Shell ───────────────────────────────────────────────────────── */
+
+.shell { min-height: 100dvh; display: flex; }
+
+.shell-center {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* ── Cards (login / setup) ───────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+.card-narrow { max-width: 420px; }
+
+.eyebrow {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.subtext { color: var(--text-dim); font-size: 0.95rem; }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span { font-size: 0.85rem; font-weight: 600; color: var(--text-dim); }
+
+.field input {
+  padding: 12px 14px;
+  min-height: 46px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+}
+.field input:focus-visible { outline: none; border-color: var(--accent); }
+.field input[aria-invalid="true"] { border-color: var(--error); }
+
+.error-text { color: var(--error); font-size: 0.88rem; }
+
+/* ── Buttons ─────────────────────────────────────────────────────── */
+
+.btn {
+  min-height: 46px;
+  padding: 12px 20px;
+  font-weight: 600;
+  border: 1.5px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+  color: var(--text);
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+}
+.btn-sm { min-height: 38px; padding: 8px 14px; font-size: 0.88rem; }
+
+.btn-primary { background: var(--accent); color: #08111f; }
+.btn-primary:active:not(:disabled) { background: var(--accent-press); }
+
+.btn-ghost { background: var(--surface-2); border-color: var(--border); }
+.btn-danger { background: transparent; border-color: var(--error); color: var(--error); }
+
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+kbd {
+  font-family: var(--mono);
+  font-size: 0.75em;
+  padding: 1px 5px;
+  margin-left: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+
+/* ── Live session ────────────────────────────────────────────────── */
+
+.shell-live { flex-direction: row; align-items: stretch; }
+
+.qr-stage {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  place-items: center;
+  padding: 2vmin;
+  background: #000;
+}
+
+/*
+  The QR sits on pure white in every theme. Contrast is this surface's only
+  job, and a dark-mode inversion breaks decoding on many phone cameras.
+  Sized in vmin so it fills whatever the projector gives us — the old build
+  inherited qrcode.react's 128px default, unreadable past the third row.
+*/
+.qr-plate {
+  background: #fff;
+  border-radius: 8px;
+  padding: 2.5vmin;
+  width: min(88vh, 88vw);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+}
+
+.qr-svg {
+  width: 100% !important;
+  height: 100% !important;
+  /*
+    Nearest-neighbour keeps module edges hard when the SVG is scaled up on a
+    projector; smoothing softens them and costs decode reliability at distance.
+  */
+  image-rendering: pixelated;
+  shape-rendering: crispEdges;
+}
+
+/* ── Side rail ───────────────────────────────────────────────────── */
+
+.rail {
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  overflow-y: auto;
+}
+
+.rail-block { display: flex; flex-direction: column; gap: 4px; }
+
+.session-id { font-size: 0.8rem; color: var(--text-dim); letter-spacing: 0.08em; }
+
+.rail-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.rail-value { font-size: 2rem; font-weight: 650; line-height: 1.1; }
+
+.rail-note { font-size: 0.85rem; }
+.rail-note.warn { color: var(--warn); }
+.rail-note.ok { color: var(--success); }
+
+.rail-actions { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+
+/* ── Focus mode ──────────────────────────────────────────────────── */
+
+.shell-live.focus .qr-stage { padding: 1vmin; }
+.shell-live.focus .qr-plate { width: min(96vh, 96vw); }
+
+.focus-exit {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 64px;
+  background: var(--surface);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  cursor: pointer;
+}
+
+/* ── Narrow screens (faculty on a phone/tablet) ──────────────────── */
+
+@media (max-width: 900px) {
+  .shell-live { flex-direction: column; }
+  .rail {
+    width: 100%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px;
+    padding: 16px;
+  }
+  .rail-actions { margin-top: 0; flex-direction: row; flex-wrap: wrap; width: 100%; }
+  .rail-value { font-size: 1.5rem; }
+  .qr-plate { width: min(70vh, 92vw); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; }
+}

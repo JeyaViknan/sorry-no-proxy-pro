@@ -33,3 +33,13 @@ docs/
 Thumbs.db
 .idea/
 .vscode/
+
+# Enrollment photographs never enter the image. Only the derived embeddings
+# (gallery/face_db.npz) are copied in — they are far harder to invert into a
+# recognisable face, and the raw images have no runtime purpose.
+gallery/images/
+gallery/rejected/
+
+# Scratch
+scripts/
+python/tests/
