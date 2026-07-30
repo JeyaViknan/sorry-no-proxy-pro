@@ -22,6 +22,7 @@ const { QrTokenService } = require("./services/qrToken");
 const { AttendanceTokenService } = require("./services/attendanceToken");
 const { SessionStore } = require("./services/sessionStore");
 const { SheetsExporter } = require("./services/sheets");
+const { SheetsWebhookExporter, NullExporter } = require("./services/sheetsWebhook");
 const { GoogleAuth } = require("./services/googleAuth");
 
 const { createHealthRouter } = require("./routes/health");
@@ -60,7 +61,17 @@ function createApp({ config, faceVerifier, googleAuth = null }) {
   // One credential provider for Sheets and Cloud Storage alike. Injected so
   // index.js can share the same instance with the gallery bootstrap.
   const auth = googleAuth || new GoogleAuth(config.google, logger);
-  const sheets = new SheetsExporter(config.sheets, auth, logger);
+
+  // Pick the export backend from config. Callers never branch on this — a
+  // disabled export is a no-op object, not a null check at every call site.
+  let sheets;
+  if (config.sheets.mode === "webhook") {
+    sheets = new SheetsWebhookExporter(config.sheets, logger);
+  } else if (config.sheets.mode === "api") {
+    sheets = new SheetsExporter(config.sheets, auth, logger);
+  } else {
+    sheets = new NullExporter();
+  }
 
   const facultyAuth = new FacultyAuth({
     secret: config.secrets.tokenSigning,

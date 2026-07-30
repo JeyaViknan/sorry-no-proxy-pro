@@ -1,91 +1,117 @@
-# Deployment Guide
+# Deployment Guide — Free Tier
 
-Follow this top to bottom. It assumes you have never deployed anything.
+Deploy the whole system for **₹0, with no credit card**.
 
 **End state — three URLs:**
 
 | What | Where | Example |
 |---|---|---|
-| Backend API **+ Student Scanner** | Google Cloud Run | `https://snp-attendance-abc123-el.a.run.app` |
+| Backend API **+ Student Scanner** | Hugging Face Spaces | `https://you-snp-attendance.hf.space` |
 | Faculty QR Portal | Cloudflare Pages | `https://snp-faculty.pages.dev` |
-| Face gallery (private, not a URL) | Cloud Storage | `gs://your-bucket/face_db.npz` |
+| Face gallery (private, not a URL) | Private HF Dataset | `hf://you/snp-gallery/face_db.npz` |
 
-**Time:** ~45 minutes, most of it waiting for the first build.
-**Cost:** roughly ₹0–400/month for a few classes a day. See [Costs](#costs).
+**Time:** ~1 hour, most of it waiting for the first build.
+**Cost:** ₹0. **Credit card:** not required anywhere.
+
+> Already have Google Cloud with billing? [docs/DEPLOYMENT-GCP.md](DEPLOYMENT-GCP.md)
+> covers Cloud Run, which is faster and has an SLA.
 
 ---
 
-## Why the scanner is not on Cloudflare Pages
+## Why this architecture
 
-You asked for three separate deployments. I served the student scanner **from
-Cloud Run instead**, and it matters:
+### The constraint that decides everything: memory
 
-Putting the scanner on Pages makes every API call cross-origin, which adds a
-**CORS preflight round-trip** to `POST /api/qr/validate` — the request that has
-to finish inside a **4-second** QR validity window, on congested lecture-hall
-wifi. Chrome also caps preflight caching at 2 hours, so students pay it again
-in each class. The scanner is **25 KB gzipped**, so there is no CDN benefit
-worth that. Same-origin also keeps the strict `connect-src 'self'` CSP intact.
+I measured the running container:
 
-The faculty portal *is* on Pages, where it belongs: its requests are batched
-(~1/minute), so preflight cost is irrelevant, and a projector machine benefits
-from a CDN.
+| Configuration | Resident memory |
+|---|---|
+| 1 verifier worker, model warm, under inference | **564 MB** |
+| 2 verifier workers | **790 MB** |
 
-You still get three URLs. Cloud Run just serves two things.
+That is InsightFace's `buffalo_l` — a 17 MB detection model and a 174 MB
+recognition model — plus ONNX Runtime, OpenCV and Node.
+
+**This single number eliminates almost every free tier**, because the common
+free allowance is 512 MB.
+
+### Platform evaluation
+
+| Platform | Node backend | Python worker | Free RAM | Card? | Verdict |
+|---|---|---|---|---|---|
+| **Hugging Face Spaces** | ✅ Docker | ✅ same container | **16 GB** | **No** | ✅ **Chosen** |
+| Cloudflare Pages | static only | ❌ | — | No | ✅ for the faculty portal |
+| Cloudflare Workers | ⚠️ V8 isolate, not Node | ❌ no native binaries | 128 MB | No | ❌ backend impossible |
+| Render (free web service) | ✅ Docker | ✅ | 512 MB | No | ❌ **OOM at 564 MB** |
+| Fly.io | ✅ Docker | ✅ | 256 MB×3 | **Yes** | ❌ card + too small |
+| Railway | ✅ | ✅ | trial credit only | Yes | ❌ not free |
+| Koyeb | ✅ Docker | ✅ | 512 MB | Yes | ❌ OOM + card |
+| Vercel | ⚠️ serverless | ❌ 250 MB bundle cap | 1 GB | No | ❌ can't ship ONNX |
+| Netlify | ⚠️ serverless | ❌ 50 MB zip cap | — | No | ❌ can't ship ONNX |
+| GitHub Pages | ❌ static | ❌ | — | No | ❌ no backend |
+| Supabase | ⚠️ Deno edge fns | ❌ | 256 MB | No | ❌ no Python |
+| Firebase | ⚠️ Cloud Functions | ⚠️ Python runtime, no custom binaries | — | **Yes** | ❌ card |
+| Oracle Cloud Always Free | ✅ VM | ✅ | 24 GB | Yes (verification) | ⚠️ card, manual ops |
+| PythonAnywhere | ❌ no Node | ⚠️ | 512 MB | No | ❌ |
+
+**Hugging Face Spaces wins decisively**: 2 vCPU and **16 GB RAM** free, no card,
+Docker SDK that runs our existing `Dockerfile` unmodified, and HTTPS built in.
+It is also where this project originally ran — the README frontmatter is still
+there.
+
+**Honest limitations of the free Space:**
+
+- **Sleeps after ~48 hours idle**, waking on the next request (~40 s). Open it
+  once before class.
+- **No SLA.** It is free infrastructure; treat an outage as possible.
+- **Ephemeral disk** — resets on restart. Irrelevant here: the gallery is
+  re-downloaded at boot by design, and attendance is exported continuously.
+- **Public Space.** Required so students can open the scanner. This is why the
+  gallery lives in a *separate private dataset* and never in the Space repo.
+
+### Could it fit in 512 MB?
+
+Yes, by switching to `buffalo_s` (a ~13 MB recognition model instead of
+174 MB), which would land around 400 MB. **I do not recommend it**: embeddings
+are not comparable across models, so it requires re-enrolling everyone, and
+accuracy drops noticeably on the degraded phone-camera images this system
+works with. Given 16 GB is available for free, there is no reason to.
 
 ---
 
 ## 1. Prerequisites
 
-Install these four, then verify each.
+### Node.js 20+
 
-### Node.js 20 or newer
-
-- **macOS:** `brew install node@20`
-- **Windows/Linux:** https://nodejs.org (LTS installer)
+- macOS: `brew install node@20` · Windows/Linux: https://nodejs.org (LTS)
 
 ```bash
 node --version
 ```
-Expect `v20.x.x` or higher. If you see `v18` or lower, upgrade — the backend
-uses built-in `fetch`, which needs Node 18+, and is tested on 20.
+Expect `v20.x.x` or higher.
 
-### Google Cloud CLI
-
-https://cloud.google.com/sdk/docs/install — use the installer for your OS.
+### Git
 
 ```bash
-gcloud --version
-```
-Expect several lines starting with `Google Cloud SDK 5xx.x.x`.
-
-> **Windows:** run everything in this guide from **Git Bash** (ships with Git
-> for Windows), not PowerShell. The `.sh` scripts are bash.
-
-### Docker *(optional)*
-
-Only needed if you want to build the image locally. `gcloud run deploy
---source` builds in the cloud, so you can skip this.
-
-```bash
-docker --version
+git --version
 ```
 
-### Python 3.11 *(optional)*
+> **Windows:** run everything below in **Git Bash**, not PowerShell.
 
-Only needed to build a gallery from enrollment photos on your own machine.
+### Accounts (all free, no card)
+
+| Account | Sign up | Used for |
+|---|---|---|
+| Hugging Face | https://huggingface.co/join | Backend + gallery |
+| Cloudflare | https://dash.cloudflare.com/sign-up | Faculty portal |
+| Google | you probably have one | Attendance spreadsheet |
+
+### Python 3.11 *(only to build a gallery locally)*
 
 ```bash
 python3 --version
 ```
-Expect `3.11.x` or `3.12.x`. **Not 3.13+** — insightface has no wheels for it
-yet, and you will get compiler errors.
-
-### A Google account with billing, and a Cloudflare account
-
-Both free to create. Billing must be **enabled** on the Google project (see
-step 2) — Cloud Run, Cloud Build and Artifact Registry all refuse to work
-without it, with error messages that never mention billing.
+`3.11.x` or `3.12.x`. **Not 3.13+** — insightface has no wheels for it.
 
 ---
 
@@ -95,144 +121,56 @@ without it, with error messages that never mention billing.
 git clone <your-repo-url> sorry-no-proxy
 cd sorry-no-proxy
 npm install
-```
-
-`npm install` should finish in under a minute and report roughly **74
-packages, 0 vulnerabilities**.
-
-Verify the code is sound before deploying it:
-
-```bash
 npm test
 ```
+
 Expect `# pass 31`, `# fail 0`.
-
----
-
-## 3. Google Cloud setup
-
-### 3.1 Create the project
-
-**In the browser:**
-
-1. Go to https://console.cloud.google.com/projectcreate
-2. **Project name:** `attendance` (or anything)
-3. Note the **Project ID** underneath — it is auto-generated, looks like
-   `attendance-482910`, and is **not** the same as the name. You need the ID.
-4. Click **Create**, wait ~30 seconds.
-
-### 3.2 Enable billing
-
-1. https://console.cloud.google.com/billing
-2. **Link a billing account** to your new project (add a card if you have none).
-
-> New Google Cloud accounts get \$300 of free credit, and this workload sits
-> largely inside the always-free tier. You will not be charged meaningfully,
-> but the project will not function without billing linked.
-
-### 3.3 Log in from the terminal
-
-```bash
-gcloud auth login
-```
-Opens a browser. Approve.
-
-```bash
-gcloud auth application-default login
-```
-A second, separate login. Both are needed — the first authenticates the
-`gcloud` command, the second authenticates libraries.
-
-### 3.4 Configure the deployment
 
 ```bash
 cp deploy.env.example deploy.env
 ```
 
-Open `deploy.env` and set:
-
-| Variable | Set it to | Notes |
-|---|---|---|
-| `GCP_PROJECT_ID` | your Project **ID** from 3.1 | not the display name |
-| `GCP_REGION` | `asia-south1` | Mumbai. Nearest region to your classrooms. |
-| `SERVICE_NAME` | `snp-attendance` | fine as-is |
-| `GCS_BUCKET` | `yourname-snp-gallery` | **globally unique** across all of Google Cloud — prefix it |
-| `SHEET_ID` | *(leave blank for now)* | filled in at step 3.6 |
-| `FACULTY_ORIGIN` | *(leave blank for now)* | filled in at step 5 |
-
-### 3.5 Run the setup script
+Edit `deploy.env` and set the free-path section:
 
 ```bash
-./scripts/setup-gcp.sh
+HF_USERNAME=your-hf-username
+HF_SPACE_NAME=snp-attendance
+GALLERY_DATASET=snp-gallery
+PAGES_PROJECT=snp-faculty
 ```
 
-**What it does:** enables 7 APIs, creates a service account, creates the
-private gallery bucket, and generates three secrets in Secret Manager. It is
-idempotent — safe to re-run.
+---
 
-**Expected output ends with:**
+## 3. Hugging Face token
 
-```
-  ┌─────────────────────────────────────────────────────────┐
-  │  FACULTY ACCESS CODE:  Xk3mP9qR2wLnB7vT              │
-  └─────────────────────────────────────────────────────────┘
-  ! Write this down NOW — it is not shown again.
-```
+1. https://huggingface.co/settings/tokens → **New token**
+2. Name: `snp-deploy`, Type: **Write**
+3. Copy it (starts `hf_`). You will paste it as a git password shortly.
 
-> **Write the faculty access code down.** Faculty type it to start a session.
-> To read it back later:
-> ```bash
-> gcloud secrets versions access latest --secret=snp-faculty-access-code
-> ```
-
-**If it fails:** see [Troubleshooting §A](#a-google-cloud-setup).
-
-### 3.6 Connect Google Sheets *(optional but recommended)*
-
-1. Create a new spreadsheet at https://sheets.new
-2. Rename the bottom tab from `Sheet1` to **`Attendance`** *(must match
-   exactly — `SHEET_RANGE` refers to it)*
-3. Click **Share**, and paste the service account address that `setup-gcp.sh`
-   printed:
-   ```
-   snp-runtime@YOUR_PROJECT_ID.iam.gserviceaccount.com
-   ```
-4. Set it to **Editor**. **Untick "Notify people".** Click **Share**.
-5. Copy the sheet ID from the URL:
-   ```
-   https://docs.google.com/spreadsheets/d/1a2B3cD4eF5gH6iJ7kL8mN9oP/edit
-                                          └──────── this part ────────┘
-   ```
-6. Put it in `deploy.env` as `SHEET_ID=`
-
-> Skipping this is fine. Attendance is still recorded server-side and
-> downloadable as CSV from the faculty portal. A Sheets outage can never block
-> a class.
+Also create a **Read** token named `snp-runtime` — the Space uses that one to
+fetch the gallery. Never give the Space a write token.
 
 ---
 
 ## 4. The face gallery
 
-The backend **will not start** without a gallery. It holds the face embeddings
-every verification compares against.
+The backend **will not start** without one.
 
-### If you have enrollment photos
+### Build it
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt   # ~5 minutes
+./.venv/bin/pip install -r requirements.txt      # ~5 minutes
 
 # Put images in gallery/images/ named {REGNO}_{NN}_{variant}.jpg
 #   e.g. 25BCE1276_01_frontal.jpg
 npm run build:gallery      # quality-gates every image, reports what to retake
-npm run verify:gallery     # audits the gallery, recommends thresholds
-./scripts/upload-gallery.sh
+npm run verify:gallery     # audits it, recommends thresholds
 ```
 
-Read `docs/ENROLLMENT.md` before collecting photos — it explains the capture
-protocol and why one image per student is the main cause of false rejections.
+Read [docs/ENROLLMENT.md](ENROLLMENT.md) before collecting photos.
 
-### If you have the legacy `face_db.pkl`
+**Converting a legacy `face_db.pkl`:**
 
 ```bash
 ./.venv/bin/python -c "
@@ -240,385 +178,284 @@ import sys; sys.path.insert(0, 'python')
 from face_pipeline import gallery
 from face_pipeline.config import PipelineConfig
 g = gallery.load(PipelineConfig.from_env())
-gallery.save('gallery/face_db.npz', {r: [g.embeddings[i] for i in rows] for r, rows in g.index.items()}, model_name='buffalo_l')
+gallery.save('gallery/face_db.npz',
+  {r: [g.embeddings[i] for i in rows] for r, rows in g.index.items()},
+  model_name='buffalo_l')
 print('converted')
 "
+```
+
+### Upload it to a PRIVATE dataset
+
+```bash
 ./scripts/upload-gallery.sh
 ```
 
-### Set your threshold
-
-The default is now `FACE_THRESHOLD_ACCEPT=0.55` — in `deploy.env`, in `.env.example`, and as the built-in fallback in both `server/config.js` and `python/face_pipeline/config.py`.
-
-**This is deliberate.** In the existing 67-student gallery, `25BRS1169` and
-`25BRS1286` score **0.5016** against each other — above 0.50, meaning those two
-students can currently mark each other present. `0.55` gives zero colliding
-pairs. Run `npm run verify:gallery` to check your own data.
+The script walks you through creating the dataset. **Visibility must be
+Private** — this is derived biometric data. When git asks for credentials:
+username = your HF username, password = your **write** token.
 
 ---
 
-## 5. Deploy the backend
+## 5. Attendance export *(optional, 5 minutes)*
+
+No cloud project, no service account, no billing.
+
+1. Create a spreadsheet: https://sheets.new
+2. **Extensions → Apps Script**
+3. Delete the placeholder, paste all of `scripts/apps-script/Code.gs`
+4. Generate a secret and put it in `SHARED_SECRET` at the top:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"
+   ```
+5. Save, then **Deploy → New deployment → Web app**
+   - Execute as: **Me**
+   - Who has access: **Anyone** ← required; the secret is the gate
+6. **Authorize access** and approve the "unverified app" screen
+7. Copy the **Web app URL** (ends in `/exec`)
+8. Optional check: **Run → testAppend**, and confirm a row appears
+
+Keep the URL and the secret — you set them on the Space next.
+
+> Skipping this is fine. Attendance is still recorded and downloadable as CSV
+> from the faculty portal.
+
+---
+
+## 6. Deploy the backend
 
 ```bash
-./scripts/deploy-backend.sh
+./scripts/deploy-hf.sh
 ```
 
-**First run takes 8–12 minutes** — Cloud Build compiles insightface and caches
-the 300 MB face model into the image. Later deploys take 2–3 minutes.
+The script:
+1. Refuses to run with uncommitted changes (a Space builds from a commit)
+2. Checks the README frontmatter is intact
+3. Adds the `space` git remote and pushes
+4. **Generates your secrets and prints them once**
+5. Waits for the build and verifies `/readyz` and the scanner
 
-**What you should see:**
+**When it pauses**, create the Space:
+- https://huggingface.co/new-space
+- Name matching `HF_SPACE_NAME`, SDK **Docker → Blank**, visibility **Public**
+
+**When it prints secrets**, set them at
+`https://huggingface.co/spaces/USER/SPACE/settings` → *Variables and secrets*:
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `QR_SIGNING_SECRET` | generated for you |
+| Secret | `TOKEN_SIGNING_SECRET` | generated for you |
+| Secret | `FACULTY_ACCESS_CODE` | generated for you — **write it down** |
+| Secret | `HF_TOKEN` | your **read** token |
+| Secret | `SHEET_WEBHOOK_SECRET` | same as `SHARED_SECRET` in Code.gs |
+| Variable | `NODE_ENV` | `production` |
+| Variable | `GALLERY_URL` | `hf://USER/snp-gallery/face_db.npz` |
+| Variable | `ALLOWED_ORIGINS` | *(fill in after step 7)* |
+| Variable | `SHEET_WEBHOOK_URL` | your `/exec` URL |
+| Variable | `FACE_WORKER_COUNT` | `2` |
+
+**The first build takes 10–20 minutes** — it compiles insightface and caches
+the 190 MB model. Watch it under the Space's **Logs** tab.
+
+Successful output ends with:
 
 ```
-Preflight
-  ✓ project attendance-482910
-  ✓ runtime service account exists
-  ✓ secrets present
-  ✓ gallery present in gs://yourname-snp-gallery
-  ✓ CORS allow-list: https://snp-faculty.pages.dev
-
-Deploying (first build takes 8-12 minutes …)
-  ... Building using Dockerfile and deploying container ...
-  ✓ Service [snp-attendance] revision [snp-attendance-00001-abc] has been deployed
-
-Verifying
-  • waiting for the model to warm (up to 3 minutes on a cold revision)…
-  ✓ service is ready
-  ✓ CORS allows https://snp-faculty.pages.dev
+  ✓ Space is ready
   ✓ student scanner is being served
 
-Deployed
-
   Backend API + Student Scanner
-    https://snp-attendance-abc123-el.a.run.app
+    https://you-snp-attendance.hf.space
 ```
 
-> **On the very first deploy** `FACULTY_ORIGIN` is blank and the script will
-> stop with a message saying so. That is expected — either put a placeholder in
-> now, or deploy the faculty portal first (step 6) and come back. The script
-> tells you which.
-
-Save that Cloud Run URL. **That is what you give students.**
-
-**If it fails:** see [Troubleshooting §B](#b-backend-deployment).
+**That URL is what you give students.**
 
 ---
 
-## 6. Deploy the faculty portal
-
-### 6.1 Log in to Cloudflare
+## 7. Deploy the faculty portal
 
 ```bash
-npx wrangler login
-```
-Opens a browser. Click **Allow**.
-
-```bash
-npx wrangler whoami
-```
-Should print your account email and ID.
-
-### 6.2 Deploy
-
-```bash
+npx wrangler login          # opens a browser
 ./scripts/deploy-faculty.sh
 ```
 
-**What it does:** reads your Cloud Run URL, checks the backend is actually
-reachable, bakes the URL into the bundle, verifies it is really in there, and
-uploads to Pages.
+It reads the backend URL, checks it is reachable, bakes it into the bundle,
+verifies it is really there, and uploads to Pages.
 
-**Expected output ends with:**
+> `VITE_API_BASE` is inlined at **build** time. If the backend URL ever
+> changes, re-run this script — a redeploy alone is not enough.
+
+### Close the CORS loop — do not skip
+
+Add the Pages URL to `ALLOWED_ORIGINS` on the Space, comma-separated with the
+Space's own URL:
 
 ```
-  ✓ backend URL baked into the bundle
-  ✨ Deployment complete! Take a peek over at https://snp-faculty.pages.dev
+https://snp-faculty.pages.dev,https://you-snp-attendance.hf.space
 ```
 
-### 6.3 Close the CORS loop — **do not skip this**
+Save. The Space restarts automatically.
 
-The backend rejects requests from origins it does not know. Put the Pages URL
-in `deploy.env`:
-
-```bash
-FACULTY_ORIGIN=https://snp-faculty.pages.dev
-```
-
-Then redeploy the backend so it takes effect:
-
-```bash
-./scripts/deploy-backend.sh
-```
-
-Skipping this produces a login that fails with a CORS error in the browser
-console and no visible message in the UI. It is the single most common
-deployment mistake.
-
-> **Vite inlines the backend URL at build time.** If the Cloud Run URL ever
-> changes, re-run `./scripts/deploy-faculty.sh` — a rebuild is required, not
-> just a redeploy.
+Skipping this gives a login that silently fails with a CORS error in the
+browser console. **It is the single most common deployment mistake.**
 
 ---
 
-## 7. Final configuration
-
-### HTTPS
-
-Automatic on both platforms. Nothing to configure.
-
-This is not optional — `getUserMedia` refuses to run outside a secure context,
-so over plain HTTP the camera silently never starts.
-
-### Custom domains *(optional)*
-
-**Cloud Run:**
-```bash
-gcloud beta run domain-mappings create \
-  --service snp-attendance --domain attendance.youruni.edu --region asia-south1
-```
-Then add the CNAME it prints to your DNS.
-
-**Cloudflare Pages:** dashboard → your project → **Custom domains** → **Set up
-a domain**.
-
-After either, add the new origin to `FACULTY_ORIGIN` and redeploy the backend.
-
-### Scaling
-
-Set in `deploy.env`, applied by `deploy-backend.sh`:
-
-| Class size | `MAX_INSTANCES` | `RATE_LIMIT_GLOBAL_PER_MIN` |
-|---|---|---|
-| ~200 | 5 | 6000 |
-| ~500 | 10 | 6000 |
-| ~2000 | 30 | 20000 |
-
-`concurrency=1` is fixed and should stay that way: the ONNX verifier is
-single-threaded, so one request per instance is what makes autoscaling behave.
-
-### Cold starts
-
-A cold instance downloads the gallery and loads a ~600 MB model — about 40
-seconds. Before class:
-
-```bash
-./scripts/warm.sh on     # waits until /readyz reports ready
-```
-After class:
-```bash
-./scripts/warm.sh off    # back to scale-to-zero, free while idle
-```
-
-### Where secrets live
-
-| Secret | Stored in | Rotate with |
-|---|---|---|
-| QR signing key | Secret Manager | `gcloud secrets versions add snp-qr-signing-secret --data-file=-` |
-| Token signing key | Secret Manager | same pattern |
-| Faculty access code | Secret Manager | same pattern (do this each semester) |
-| Google credentials | **nowhere** | Cloud Run uses the instance service account via the metadata server — there is no key to leak |
-
-After rotating any secret, redeploy so the new version is picked up. Rotating
-the QR key instantly invalidates every code in circulation.
-
----
-
-## Costs
-
-| Service | Typical | Notes |
-|---|---|---|
-| Cloud Run | ₹0–300/mo | Free tier covers 2M requests. You mostly pay for warm minutes. |
-| Cloud Storage | ~₹2/mo | The gallery is a few hundred KB. |
-| Cloud Build | ₹0 | 120 free build-minutes/day. |
-| Artifact Registry | ~₹40/mo | ~2 GB image. Prune old revisions to reduce. |
-| Cloudflare Pages | ₹0 | Free tier is generous. |
-
-Leaving `MIN_INSTANCES=1` around the clock costs roughly ₹1,800/month — use
-`warm.sh` instead.
-
----
-
-## 8. Verification checklist
-
-Run through this before trusting it with a real class.
+## 8. Verification
 
 ### Backend
 
 ```bash
-URL=https://your-service-url.run.app
+URL=https://you-snp-attendance.hf.space
 
-curl -s $URL/healthz
-# {"ok":true,"uptimeSec":123}
-
+curl -s $URL/healthz          # {"ok":true,...}
 curl -s $URL/readyz | python3 -m json.tool
-# "ready": true, verifier.workers[].ready true, sheets.enabled as configured
 ```
 
-- [ ] `/healthz` returns `ok:true`
-- [ ] `/readyz` returns `ready:true` *(if false, the model is still loading or the gallery failed — check logs)*
-- [ ] `readyz` shows the expected number of workers
-- [ ] Opening `$URL/` in a browser shows **"Mark your attendance"**
+- [ ] `/healthz` → `ok:true`
+- [ ] `/readyz` → `ready:true` *(false = still loading, or the gallery failed)*
+- [ ] `readyz` shows `sheets.mode: "apps-script-webhook"` if you set it up
+- [ ] `$URL/` in a browser shows **"Mark your attendance"**
 
 ### Security — these must all fail
 
 ```bash
-# The old bypass: attendance with no QR and no face
 curl -s -o /dev/null -w "%{http_code}\n" -X POST $URL/register \
-  -H 'Content-Type: application/json' -d '{"registerNumber":"25BCE1276"}'
-# 404
+  -H 'Content-Type: application/json' -d '{"registerNumber":"25BCE1276"}'   # 404
 
-# Biometric data must not be reachable
 curl -s -o /dev/null -w "%{http_code}\n" $URL/gallery/images/25BCE1276.png   # 404
 curl -s -o /dev/null -w "%{http_code}\n" $URL/.env                            # 404
-curl -s -o /dev/null -w "%{http_code}\n" $URL/server.js                       # 404
 
-# Attendance without a token
 curl -s -X POST $URL/api/attendance -H 'Content-Type: application/json' -d '{}'
 # {"ok":false,"code":"TOKEN_MALFORMED",...}
 
-# A rogue origin
 curl -s -o /dev/null -w "%{http_code}\n" -H "Origin: https://evil.example" \
-  -X OPTIONS $URL/api/faculty/login
-# 403
+  -X OPTIONS $URL/api/faculty/login                                           # 403
 ```
 
-- [ ] All six behave as shown
+- [ ] All five behave as shown
 
 ### Faculty portal
 
 - [ ] Opens at the Pages URL
 - [ ] Wrong access code → *"Incorrect access code."*
-- [ ] Correct code → setup screen (**if this fails, CORS — step 6.3**)
-- [ ] **Start session** → large QR fills the screen, rotating a few times a second
-- [ ] Timer counts up; "Marked present" shows `0`
-- [ ] `F` toggles fullscreen, `H` hides the panel
-- [ ] **Download CSV** downloads a file with a header row
+- [ ] Correct code → setup screen *(fails here = CORS, step 7)*
+- [ ] **Start session** → large QR fills the screen, rotating
+- [ ] `F` fullscreen, `H` hides the panel
+- [ ] **Download CSV** produces a file with a header row
 
-### End-to-end, on a real phone
+### End to end, on a real phone over mobile data
 
-Do this on an actual phone over **mobile data**, not desktop over wifi.
+- [ ] Open the Space URL → intro screen
+- [ ] **Start** → permission prompt → rear camera opens
+- [ ] Point at the projected QR → advances within ~2 s
+- [ ] Front camera opens, guide visible, hint says **"Looking good"**
+- [ ] Enter registration number → **Mark me present**
+- [ ] Preview freezes on your photo → result within ~3 s
+- [ ] Faculty count increments within ~6 s
+- [ ] A row appears in the spreadsheet within ~10 s
+- [ ] Scan again → *"Already marked present"* (not an error)
 
-- [ ] Open the Cloud Run URL → intro screen
-- [ ] Tap **Start** → camera permission prompt → rear camera opens
-- [ ] Point at the projected QR → advances within ~2 seconds
-- [ ] Front camera opens, face guide visible, hint reads **"Looking good"**
-- [ ] Type a registration number → **Mark me present** enables
-- [ ] Tap it → preview freezes on your photo → result within ~3 seconds
-- [ ] Faculty portal's "Marked present" count goes up within ~6 seconds
-- [ ] Sheets: a row appears within ~10 seconds *(if configured)*
-- [ ] Scan again with the same number → *"Already marked present"* (not an error)
-
-### Face verification behaviour
+### Face verification
 
 - [ ] An enrolled student is accepted
-- [ ] A **different** person using that number is rejected
-- [ ] Covering the camera → *"Could not read your face"*, and **retry still works**
-      *(quality failures must not consume the 3 identity attempts)*
+- [ ] A different person using that number is rejected
+- [ ] Cover the camera → *"Could not read your face"*, **and retry still works**
 - [ ] Three genuine mismatches → *"Too many attempts"*
 
-### Mobile compatibility
+### Mobile
 
 | Device | Check |
 |---|---|
-| iPhone Safari | Camera preview is **not black** — this was the #1 historical failure |
-| Chrome Android | Scans fast (uses the native barcode API) |
-| Samsung Internet | Rear→front camera handoff does not error |
+| iPhone Safari | Preview is **not black** — the historical #1 failure |
+| Chrome Android | Fast (native barcode API, skips a 368 KB download) |
+| Samsung Internet | Rear→front handoff does not error |
 | Firefox Mobile | Falls back to the bundled decoder |
 
-- [ ] Background the app mid-capture, return → recovers, no stale frame
-- [ ] Rotate the phone → layout stays usable
+- [ ] Background mid-capture, return → recovers, no stale frame
 
 ### Slow network
 
-Chrome DevTools → Network → throttle to **Slow 3G**:
+DevTools → Network → **Slow 3G**:
 
 - [ ] Scanner still loads (~25 KB gzipped)
-- [ ] "Network is slow — retrying (1/3)…" appears instead of freezing
-- [ ] Submission eventually succeeds
-- [ ] Airplane mode → *"No internet connection"* banner; restore → clears
+- [ ] *"Network is slow — retrying (1/3)…"* instead of freezing
+- [ ] Airplane mode → offline banner; restore → clears
 
 ---
 
 ## 9. Troubleshooting
 
-### A. Google Cloud setup
+### Hugging Face Space
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `PERMISSION_DENIED: caller does not have permission` | Not an Owner/Editor on the project | Ask whoever owns it for **Owner**, or use your own project |
-| `Billing account not found` / API enable fails | Billing not linked | https://console.cloud.google.com/billing — link an account |
-| `The project ... does not exist` | Using the project **name**, not the **ID** | `gcloud projects list` — take the `PROJECT_ID` column |
-| `bucket names must be globally unique` | Someone else has that name | Add a prefix: `yourname-snp-gallery` |
-| `gcloud: command not found` | CLI not on PATH | Reopen your terminal; on Windows use Git Bash |
+| Build fails immediately, "no Dockerfile" | Frontmatter missing/edited | `README.md` must start with `---` … `sdk: docker` … `app_port: 7860` |
+| Logs: `Refusing to start — invalid configuration` | A secret is unset | The log names it. Add it under Settings, then **Restart this Space**. |
+| Logs: `could not obtain the gallery` + `not found` | `HF_TOKEN` missing/wrong, or `GALLERY_URL` typo'd | HF returns **404, not 403**, for unauthorised private repos. Check the token is a *read* token on the right account. |
+| Logs: `returned an HTML page, not a file` | `GALLERY_URL` points at a web page | Use `hf://owner/dataset/face_db.npz`, or a URL containing `/resolve/` |
+| Space says "Sleeping" | ~48 h idle | Open the URL; it wakes in ~40 s |
+| Push rejected | Wrong credentials | Username = HF username, password = **write** token (not your password) |
+| `/readyz` stuck `ready:false` | Still loading, or a worker crash-looping | Wait 3 min. Then check logs for `[verifier]`. |
+| Build succeeds, app 500s | Secrets added *after* the build | **Restart this Space** — secrets are injected at container start |
 
-### B. Backend deployment
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `gs://.../face_db.npz not found` | No gallery uploaded | `./scripts/upload-gallery.sh` (build one first, step 4) |
-| Build fails: `failed to solve` / `pip install` errors | Transient network in Cloud Build | Re-run. If persistent, check `requirements.txt` was not edited |
-| `Revision ... failed with message: Container failed to start` | The container exited at boot | `gcloud run services logs read snp-attendance --region asia-south1 --limit 100` and look for `FATAL` |
-| Logs show `could not obtain the face gallery` | Service account cannot read the bucket | `gcloud storage buckets add-iam-policy-binding gs://BUCKET --member=serviceAccount:snp-runtime@PROJECT.iam.gserviceaccount.com --role=roles/storage.objectViewer` |
-| Logs show `Refusing to start — invalid configuration` | A required env var is missing | The log lists exactly which. Usually a secret failed to mount — re-run `setup-gcp.sh` |
-| `/readyz` stays `ready:false` | Model still loading, or a worker is crash-looping | Wait 3 min. Then check logs for `[verifier]`. If OOM, raise `MEMORY` to `4Gi` or drop `FACE_WORKER_COUNT` to `1` |
-| Deploy succeeds, `/` returns 404 | `public/` did not make it into the image | Confirm `public/index.html` is **committed** — `.dockerignore` excludes untracked paths only if gitignored, but a missing file is a missing file |
-
-### C. Faculty portal
+### Faculty portal
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Login does nothing; console shows `blocked by CORS policy` | Pages origin not allow-listed | Set `FACULTY_ORIGIN` in `deploy.env`, re-run `./scripts/deploy-backend.sh` — **step 6.3** |
-| Login shows *"Cannot reach the attendance server"* | Wrong or stale `VITE_API_BASE` | Re-run `./scripts/deploy-faculty.sh` (rebuild is required) |
-| `wrangler: not found` | Wrangler not installed | `npx wrangler` downloads it on demand; check Node 20+ |
-| `Project not found` | Pages project does not exist yet | The script creates it on first deploy; if prompted, choose **Create new project** |
-| QR is tiny | Stale cached build | Hard-refresh (Ctrl/Cmd+Shift+R) |
+| Login does nothing; console shows CORS | Pages origin not allow-listed | Add it to `ALLOWED_ORIGINS` on the Space — **step 7** |
+| *"Cannot reach the attendance server"* | Stale `VITE_API_BASE` | Re-run `./scripts/deploy-faculty.sh` (rebuild required) |
+| `wrangler: not found` | — | `npx wrangler login`; needs Node 20+ |
 | **Download CSV** does nothing | Faculty token expired (6 h) | Sign out and back in |
 
-### D. Student scanner
+### Student scanner
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| *"This page must be opened over HTTPS"* | Opened over `http://` or an IP | Use the `https://` Cloud Run URL |
-| Camera permission blocked | Denied earlier and remembered | Tap the padlock/camera icon in the address bar → Allow → reload |
-| **Black preview on iPhone** | Historically a missing `muted` attribute | Should be fixed. If it recurs, confirm the deployed `index.html` has `muted` on both `<video>` tags |
-| Scans but never advances | Faculty session ended, or clock skew | Check the portal is still running; check the phone's clock is set to automatic |
-| *"Verification is temporarily unavailable"* | Verifier not ready | `curl $URL/readyz`. Cold start takes ~40 s |
-| Always *"Could not read your face"* | Lighting, or thresholds too strict | Face a window. Then `npm run verify:gallery` |
-| Rejects a genuine student | Single-image gallery, or uncalibrated threshold | The known limitation — see `docs/ENROLLMENT.md` |
+| *"This page must be opened over HTTPS"* | Opened over `http://` | Use the `https://` Space URL |
+| Camera blocked | Denied and remembered | Padlock icon → Allow → reload |
+| Black preview on iPhone | Historical `muted` bug | Should be fixed; confirm both `<video>` tags have `muted` |
+| Scans but never advances | Session ended, or phone clock wrong | Check the portal; set the phone clock to Automatic |
+| *"Verification is temporarily unavailable"* | Space asleep or still warming | `curl $URL/readyz`; wake takes ~40 s |
+| Rejects a genuine student | Single-image gallery / uncalibrated threshold | Known limitation — [ENROLLMENT.md](ENROLLMENT.md) |
 
-### E. Google Sheets
+### Attendance export
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| No rows appear | Sheet not shared with the service account | Share as **Editor** with `snp-runtime@PROJECT.iam.gserviceaccount.com` |
-| Logs: `append failed (403)` | Same as above, or Sheets API disabled | `gcloud services enable sheets.googleapis.com` |
-| Logs: `append failed (400)` | Tab named something other than `Attendance` | Rename the tab, or change `SHEET_RANGE` |
-| Rows lag by a few seconds | Expected — batched off the request path | Not a fault. Attendance is already durable server-side. |
+| No rows appear | Wrong secret | `SHEET_WEBHOOK_SECRET` must equal `SHARED_SECRET` in Code.gs, exactly |
+| Logs: `returned an HTML error page` | Deployment not set to "Anyone", or edited without redeploying | Deploy → Manage deployments → edit → **New version** → Deploy |
+| Logs: `HTTP 401/403` | Deployment access is restricted | Set *Who has access* to **Anyone** |
+| Rows lag a few seconds | Expected — batched off the request path | Not a fault |
 
 ### Reading logs
 
-```bash
-# Live tail
-gcloud run services logs tail snp-attendance --region asia-south1
-
-# Recent errors only
-gcloud run services logs read snp-attendance --region asia-south1 --limit 200 \
-  | grep -i error
-```
-
-Every response carries an `X-Request-Id`, and error screens show it. If a
-student reports a failure, ask for that id and grep the logs for it — it maps
-to exactly one request.
+Space → **Logs** tab. Every response carries an `X-Request-Id`, shown on the
+scanner's error screens — ask a student for it and search the logs.
 
 ---
 
-## 10. If something goes wrong
+## 10. Operating it
+
+See [docs/RUNBOOK.md](RUNBOOK.md). The short version:
+
+```bash
+# Before class — wake the Space (it sleeps after ~48h idle)
+curl -s https://you-snp-attendance.hf.space/readyz
+
+# After re-enrolling students
+npm run build:gallery && npm run verify:gallery && ./scripts/upload-gallery.sh
+# then Restart the Space so it re-downloads
+```
+
+---
+
+## 11. If something goes wrong
 
 Send me:
 
-1. The exact command you ran
-2. The full error output
-3. `gcloud run services logs read snp-attendance --region YOUR_REGION --limit 50`
-4. For browser problems: the console tab (F12 → Console)
+1. The command you ran and its full output
+2. The Space's **Logs** tab (last ~50 lines)
+3. For browser issues: the console (F12 → Console)
 
-Both deploy scripts are safe to re-run — they check current state before
-changing anything.
+All scripts are safe to re-run.

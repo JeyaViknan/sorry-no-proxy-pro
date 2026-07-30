@@ -15,7 +15,7 @@ the projector, plus face verification on the student's own phone.
 ```
 ┌─ Faculty portal ──┐      ┌─ Backend ─────────────┐
 │ React + Vite      │─────▶│ Node + Express        │
-│ Cloudflare Pages  │      │ Google Cloud Run      │
+│ Cloudflare Pages  │      │ Hugging Face Space    │
 │ shows signed QR   │      │  • signs QR payloads  │
 │ rotating ~400ms   │      │  • issues tokens      │
 └───────────────────┘      │  • Python verifier    │
@@ -25,12 +25,17 @@ the projector, plus face verification on the student's own phone.
 │ 25 KB gzipped     │      └───────────┬───────────┘
 │ same origin ──────┘                  │
 └───────────────────┘      ┌───────────▼───────────┐
-                           │ Cloud Storage         │
-                           │ face_db.npz (private) │
+                           │ Private HF Dataset    │
+                           │ face_db.npz           │
                            └───────────────────────┘
 ```
 
-**→ Deploying? [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) is the step-by-step guide.**
+**Deploys free, with no credit card.** Hugging Face Spaces gives 16 GB RAM on
+its free tier — and the verifier needs 564 MB, which rules out the usual
+512 MB free allowances.
+
+**→ [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — free path, step by step.
+**→ [docs/DEPLOYMENT-GCP.md](docs/DEPLOYMENT-GCP.md)** — Google Cloud Run, if you have billing.
 
 ---
 
@@ -57,8 +62,9 @@ npm run dev --prefix QR-Faculty-Portal     # faculty portal    → localhost:517
 
 The faculty dev server proxies `/api` to the backend, so no extra config.
 
-> The backend refuses to start without `gallery/face_db.npz`. Build one with
-> `npm run build:gallery`, or point `GALLERY_GCS_URI` at a bucket.
+> The backend refuses to start without a gallery. Build one with
+> `npm run build:gallery`, or point `GALLERY_URL` at a private HF dataset
+> (`hf://you/snp-gallery/face_db.npz`, plus `HF_TOKEN`).
 
 > Camera access needs a secure context. `localhost` counts; a LAN IP does not —
 > to test on a phone, use `npx localtunnel --port 7860` or deploy.
@@ -102,11 +108,12 @@ docs/                Deployment, protocol, enrollment
 | `npm test` | 31 unit + contract tests |
 | `npm run build:gallery` | Turn `gallery/images/` into `face_db.npz`, quality-gating each photo |
 | `npm run verify:gallery` | Audit the gallery; recommend thresholds; flag lookalikes |
-| `./scripts/setup-gcp.sh` | One-time Google Cloud setup |
-| `./scripts/deploy-backend.sh` | Deploy to Cloud Run |
-| `./scripts/deploy-faculty.sh` | Build + deploy the portal to Cloudflare Pages |
-| `./scripts/upload-gallery.sh` | Push the gallery to Cloud Storage |
-| `./scripts/warm.sh on\|off` | Keep an instance warm around class time |
+| `./scripts/deploy-hf.sh` | Deploy the backend to a Hugging Face Space (free) |
+| `./scripts/deploy-faculty.sh` | Build + deploy the portal to Cloudflare Pages (free) |
+| `./scripts/upload-gallery.sh` | Push the gallery to a private HF dataset, or to GCS |
+| `./scripts/setup-gcp.sh` | Google Cloud setup — **billed path only** |
+| `./scripts/deploy-backend.sh` | Deploy to Cloud Run — **billed path only** |
+| `./scripts/warm.sh on\|off` | Keep a Cloud Run instance warm — **billed path only** |
 
 ## Testing
 
@@ -136,11 +143,16 @@ These are real and documented, not oversights:
 - **Session state is in-memory.** Correct for one instance (a few thousand
   students per class). Multiple instances need a shared store — swap
   `SessionStore` for a Redis implementation with the same interface.
+- **A free Hugging Face Space sleeps after ~48 h idle** and wakes in ~40 s on
+  the next request, and carries no SLA. Open it once before class. If you need
+  guaranteed availability, use the Cloud Run path.
 
 ## Privacy
 
 Student face images are sensitive personal data under the DPDP Act 2023. They
 are gitignored, excluded from the container image (only derived embeddings ship),
-stored in a private bucket with public access prevention, and never served over
-HTTP. See [docs/ENROLLMENT.md](docs/ENROLLMENT.md) for retention and the
-outstanding git-history cleanup.
+stored in a **private** repository (HF dataset or GCS bucket), and never served
+over HTTP. The Space that runs the app is public so students can reach the
+scanner — which is precisely why the gallery lives somewhere else. See
+[docs/ENROLLMENT.md](docs/ENROLLMENT.md) for retention and the outstanding
+git-history cleanup.

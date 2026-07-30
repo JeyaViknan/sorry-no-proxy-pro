@@ -101,21 +101,50 @@ if (allowedOrigins.includes("*")) {
   errors.push('ALLOWED_ORIGINS must not contain "*" — list exact origins');
 }
 
-// ── Google Sheets (optional by design) ──────────────────────────────
+// ── Attendance export (all optional by design) ──────────────────────
+//
+// Three modes, in order of setup cost:
+//   1. webhook  SHEET_WEBHOOK_URL  — Google Apps Script. No cloud project,
+//                                    no service account, no billing.
+//   2. api      SHEET_ID           — Sheets API via a service account or the
+//                                    instance metadata server.
+//   3. none                        — CSV download only. Always available.
+//
+// Attendance is durable server-side regardless; export is a convenience and
+// can never block a class.
+const sheetWebhookUrl = optional("SHEET_WEBHOOK_URL");
+const sheetWebhookSecret = optional("SHEET_WEBHOOK_SECRET");
 const sheetsEmail = optional("GOOGLE_SERVICE_ACCOUNT_EMAIL");
 const sheetsKeyRaw = optional("GOOGLE_PRIVATE_KEY");
 const sheetId = optional("SHEET_ID");
 
-// SHEET_ID alone is enough: on Cloud Run the credential comes from the
-// instance metadata server, so no key needs to exist in the environment.
-// An explicit key is only needed off-platform (local development).
-const sheetsEnabled = Boolean(sheetId);
+let exportMode = "none";
+if (sheetWebhookUrl) exportMode = "webhook";
+else if (sheetId) exportMode = "api";
 
-if (sheetsEnabled && !sheetsEmail && !sheetsKeyRaw) {
+if (exportMode === "webhook") {
+  if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(sheetWebhookUrl)) {
+    warnings.push(
+      "SHEET_WEBHOOK_URL does not look like an Apps Script URL " +
+        "(https://script.google.com/macros/s/.../exec). Double-check you copied " +
+        "the deployment URL, not the editor URL."
+    );
+  }
+  if (!sheetWebhookSecret || sheetWebhookSecret.length < 16) {
+    errors.push(
+      "SHEET_WEBHOOK_SECRET must be set and at least 16 characters. The webhook " +
+        "is a public URL, so the shared secret is the only thing stopping anyone " +
+        "who learns it from writing rows into your attendance sheet."
+    );
+  }
+}
+
+if (exportMode === "api" && !sheetsEmail && !sheetsKeyRaw) {
   warnings.push(
     "Sheets export will authenticate via the instance service account " +
       "(metadata server). Off Google Cloud this fails — set " +
-      "GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY for local use."
+      "GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY, or use " +
+      "SHEET_WEBHOOK_URL instead (no cloud project required)."
   );
 }
 if ((sheetsEmail && !sheetsKeyRaw) || (!sheetsEmail && sheetsKeyRaw)) {
@@ -123,11 +152,18 @@ if ((sheetsEmail && !sheetsKeyRaw) || (!sheetsEmail && sheetsKeyRaw)) {
     "GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY must be set together, or neither."
   );
 }
-if (!sheetsEnabled) {
+if (exportMode === "none") {
   warnings.push(
-    "Google Sheets export is OFF (SHEET_ID unset). Attendance is still recorded " +
-      "server-side and exportable via /api/sessions/:id/export — a Sheets outage " +
-      "never blocks a class."
+    "Spreadsheet export is OFF. Attendance is still recorded server-side and " +
+      "downloadable as CSV from the faculty portal."
+  );
+}
+
+// Validate the gallery source at boot rather than mid-startup.
+const galleryUrl = optional("GALLERY_URL");
+if (galleryUrl && !/^(https?:\/\/|hf:\/\/)/.test(galleryUrl)) {
+  errors.push(
+    `GALLERY_URL must be an https:// URL or hf://owner/dataset/file (got "${galleryUrl}")`
   );
 }
 
@@ -223,10 +259,14 @@ const config = Object.freeze({
       "https://www.googleapis.com/auth/devstorage.read_only",
     ]),
     galleryGcsUri,
+    galleryUrl,
   }),
 
   sheets: Object.freeze({
-    enabled: sheetsEnabled,
+    mode: exportMode,
+    enabled: exportMode !== "none",
+    webhookUrl: sheetWebhookUrl,
+    webhookSecret: sheetWebhookSecret,
     spreadsheetId: sheetId,
     range: optional("SHEET_RANGE", "Attendance!A:G"),
     flushIntervalMs: integer("SHEET_FLUSH_INTERVAL_MS", 5000, { min: 1000, max: 60000 }),
