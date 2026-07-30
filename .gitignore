@@ -1,0 +1,34 @@
+# ── Dependencies ────────────────────────────────────────────────────
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ── Secrets ─────────────────────────────────────────────────────────
+# NEVER commit these. Use .env.example as the template.
+.env
+.env.*
+!.env.example
+*.pem
+*-service-account*.json
+
+# ── Biometric data (see docs/ENROLLMENT.md) ─────────────────────────
+# Student face images and derived embeddings are sensitive personal data
+# under the DPDP Act 2023. They live in encrypted private storage and are
+# fetched at build/deploy time — never committed to source control.
+gallery/images/
+gallery/*.pkl
+gallery/**/meta.json
+
+# ── Build output ────────────────────────────────────────────────────
+dist/
+build/
+*.log
+
+# ── OS / editor ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

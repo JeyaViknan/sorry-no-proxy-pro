@@ -1,0 +1,214 @@
+"use strict";
+
+/**
+ * Centralised, validated configuration.
+ *
+ * Design rule: the process refuses to start if a security-critical value
+ * is missing or weak. The previous version silently degraded — an unset
+ * GOOGLE_PRIVATE_KEY became the empty string and failures only surfaced
+ * mid-class. Fail at boot, loudly, where it is cheap to fix.
+ */
+
+require("dotenv").config();
+
+const path = require("path");
+
+const errors = [];
+const warnings = [];
+
+function required(name, { minLength = 1 } = {}) {
+  const value = (process.env[name] || "").trim();
+  if (!value) {
+    errors.push(`${name} is required but not set`);
+    return "";
+  }
+  if (value.length < minLength) {
+    errors.push(`${name} must be at least ${minLength} characters (got ${value.length})`);
+    return value;
+  }
+  return value;
+}
+
+function optional(name, fallback = "") {
+  const value = (process.env[name] || "").trim();
+  return value || fallback;
+}
+
+function integer(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = (process.env[name] || "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    errors.push(`${name} must be an integer (got "${raw}")`);
+    return fallback;
+  }
+  if (parsed < min || parsed > max) {
+    errors.push(`${name} must be between ${min} and ${max} (got ${parsed})`);
+    return fallback;
+  }
+  return parsed;
+}
+
+function decimal(name, fallback, { min = 0, max = 1 } = {}) {
+  const raw = (process.env[name] || "").trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    errors.push(`${name} must be a number between ${min} and ${max} (got "${raw}")`);
+    return fallback;
+  }
+  return parsed;
+}
+
+function list(name, fallback = []) {
+  const raw = (process.env[name] || "").trim();
+  if (!raw) return fallback;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const nodeEnv = optional("NODE_ENV", "development");
+const isProduction = nodeEnv === "production";
+
+// ── Secrets ─────────────────────────────────────────────────────────
+// 24 chars is the floor for an HMAC secret that resists offline guessing.
+const qrSigningSecret = required("QR_SIGNING_SECRET", { minLength: 24 });
+const tokenSigningSecret = required("TOKEN_SIGNING_SECRET", { minLength: 24 });
+const facultyAccessCode = required("FACULTY_ACCESS_CODE", { minLength: 12 });
+
+if (qrSigningSecret && qrSigningSecret === tokenSigningSecret) {
+  errors.push(
+    "QR_SIGNING_SECRET and TOKEN_SIGNING_SECRET must differ — sharing them means " +
+      "compromising the QR secret also grants the ability to mint attendance tokens"
+  );
+}
+
+// ── CORS ────────────────────────────────────────────────────────────
+const allowedOrigins = list("ALLOWED_ORIGINS");
+if (isProduction && allowedOrigins.length === 0) {
+  errors.push(
+    "ALLOWED_ORIGINS must be set in production. The previous `origin: \"*\"` let " +
+      "any website on the internet post attendance on a student's behalf."
+  );
+}
+if (allowedOrigins.includes("*")) {
+  errors.push('ALLOWED_ORIGINS must not contain "*" — list exact origins');
+}
+
+// ── Google Sheets (optional by design) ──────────────────────────────
+const sheetsEmail = optional("GOOGLE_SERVICE_ACCOUNT_EMAIL");
+const sheetsKeyRaw = optional("GOOGLE_PRIVATE_KEY");
+const sheetId = optional("SHEET_ID");
+const sheetsEnabled = Boolean(sheetsEmail && sheetsKeyRaw && sheetId);
+
+if (!sheetsEnabled && (sheetsEmail || sheetsKeyRaw || sheetId)) {
+  warnings.push(
+    "Google Sheets is partially configured and therefore disabled. Set all of " +
+      "GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY and SHEET_ID, or none."
+  );
+}
+if (!sheetsEnabled) {
+  warnings.push(
+    "Google Sheets export is OFF. Attendance is still recorded server-side and " +
+      "can be exported later — a Sheets outage never blocks a class."
+  );
+}
+
+// ── QR protocol timing ──────────────────────────────────────────────
+const qrTokenTtlMs = integer("QR_TOKEN_TTL_MS", 4000, { min: 1000, max: 30000 });
+const qrClockSkewMs = integer("QR_CLOCK_SKEW_MS", 2000, { min: 0, max: 10000 });
+const attendanceTokenTtlMs = integer("ATTENDANCE_TOKEN_TTL_MS", 120000, {
+  min: 15000,
+  max: 600000,
+});
+
+// ── Face verification ───────────────────────────────────────────────
+const faceThresholdAccept = decimal("FACE_THRESHOLD_ACCEPT", 0.5, { min: 0.1, max: 0.99 });
+const faceThresholdReview = decimal("FACE_THRESHOLD_REVIEW", 0.42, { min: 0.1, max: 0.99 });
+if (faceThresholdReview > faceThresholdAccept) {
+  errors.push(
+    `FACE_THRESHOLD_REVIEW (${faceThresholdReview}) must be <= ` +
+      `FACE_THRESHOLD_ACCEPT (${faceThresholdAccept})`
+  );
+}
+
+const config = Object.freeze({
+  nodeEnv,
+  isProduction,
+  port: integer("PORT", 7860, { min: 1, max: 65535 }),
+
+  secrets: Object.freeze({
+    qrSigning: qrSigningSecret,
+    tokenSigning: tokenSigningSecret,
+    facultyAccessCode,
+  }),
+
+  cors: Object.freeze({ allowedOrigins }),
+
+  qr: Object.freeze({
+    tokenTtlMs: qrTokenTtlMs,
+    clockSkewMs: qrClockSkewMs,
+    // How far ahead the faculty display may prefetch signed tokens. Larger
+    // batches mean fewer round trips on flaky classroom wifi; too large and
+    // a leaked batch stays useful for longer. 60s is the balance point.
+    maxBatchSpanMs: integer("QR_MAX_BATCH_SPAN_MS", 60000, { min: 10000, max: 300000 }),
+  }),
+
+  attendance: Object.freeze({
+    tokenTtlMs: attendanceTokenTtlMs,
+    maxAttempts: integer("FACE_MAX_ATTEMPTS", 3, { min: 1, max: 10 }),
+    sessionTtlMs: integer("SESSION_TTL_MS", 3 * 60 * 60 * 1000, {
+      min: 60000,
+      max: 12 * 60 * 60 * 1000,
+    }),
+    registerNumberPattern: optional("REGISTER_NUMBER_PATTERN", "^[0-9]{2}[A-Z]{3}[0-9]{4}$"),
+  }),
+
+  face: Object.freeze({
+    thresholdAccept: faceThresholdAccept,
+    thresholdReview: faceThresholdReview,
+    maxFramesPerRequest: integer("FACE_MAX_FRAMES", 3, { min: 1, max: 5 }),
+    // Per-frame ceiling. A 720p JPEG at q0.92 is ~180KB; 400KB leaves headroom
+    // without letting a client tie up a worker with a huge upload.
+    maxFrameBytes: integer("FACE_MAX_FRAME_BYTES", 400 * 1024, { min: 32 * 1024 }),
+    workerCount: integer("FACE_WORKER_COUNT", 1, { min: 1, max: 8 }),
+    requestTimeoutMs: integer("FACE_REQUEST_TIMEOUT_MS", 20000, { min: 3000, max: 60000 }),
+  }),
+
+  sheets: Object.freeze({
+    enabled: sheetsEnabled,
+    clientEmail: sheetsEmail,
+    privateKey: sheetsKeyRaw.replace(/\\n/g, "\n"),
+    spreadsheetId: sheetId,
+    range: optional("SHEET_RANGE", "Attendance!A:G"),
+    flushIntervalMs: integer("SHEET_FLUSH_INTERVAL_MS", 5000, { min: 1000, max: 60000 }),
+  }),
+
+  paths: Object.freeze({
+    root: path.resolve(__dirname, ".."),
+    publicDir: path.resolve(__dirname, "..", "public"),
+    galleryDir: path.resolve(__dirname, "..", optional("GALLERY_DIR", "./gallery")),
+    pythonBin: optional("PYTHON_BIN", "python3"),
+    verifierScript: path.resolve(__dirname, "..", "python", "verifier.py"),
+  }),
+});
+
+function validateOrExit(logger = console) {
+  for (const warning of warnings) logger.warn(`[config] ${warning}`);
+
+  if (errors.length > 0) {
+    logger.error("[config] Refusing to start — invalid configuration:");
+    for (const error of errors) logger.error(`  • ${error}`);
+    logger.error("");
+    logger.error("  Copy .env.example to .env and fill in the values.");
+    logger.error("  Generate a secret with:");
+    logger.error(
+      '    node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"'
+    );
+    process.exit(1);
+  }
+}
+
+module.exports = { config, validateOrExit };

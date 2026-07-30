@@ -1,0 +1,35 @@
+# Keep the build context small and prevent host-built artifacts from
+# overwriting what the image installs for linux/amd64.
+
+# Host-built dependencies — MUST be excluded. `npm ci` runs inside the
+# image; copying the host's node_modules over it can replace Linux
+# binaries with macOS ones.
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Version control & CI
+.git/
+.gitignore
+.github/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Faculty app is deployed separately as a static site (see docs/DEPLOYMENT.md)
+QR-Faculty-Portal/
+
+# Docs and local tooling
+docs/
+*.md
+!README.md
+
+# OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
