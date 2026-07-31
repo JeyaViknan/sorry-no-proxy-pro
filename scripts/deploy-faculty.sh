@@ -30,9 +30,14 @@ PAGES_PROJECT="${PAGES_PROJECT:-snp-faculty}"
 # ── Resolve the backend URL ──────────────────────────────────────────
 bold "Preflight"
 
+# Resolve the backend URL, in order of specificity.
 API_BASE="${VITE_API_BASE:-}"
-if [[ -z "$API_BASE" ]]; then
-  info "VITE_API_BASE not set — reading it from Cloud Run"
+[[ -z "$API_BASE" ]] && API_BASE="${BACKEND_URL:-}"
+if [[ -z "$API_BASE" && -n "${NGROK_DOMAIN:-}" ]]; then
+  API_BASE="https://${NGROK_DOMAIN}"
+fi
+if [[ -z "$API_BASE" ]] && command -v gcloud >/dev/null; then
+  info "no BACKEND_URL set — trying Cloud Run"
   API_BASE="$(gcloud run services describe "${SERVICE_NAME:-snp-attendance}" \
     --region "${GCP_REGION:-asia-south1}" --format='value(status.url)' 2>/dev/null || true)"
 fi
@@ -47,7 +52,7 @@ ok "backend: $API_BASE"
 
 # A portal built against an unreachable backend looks fine and fails at login,
 # so check now rather than in front of a class.
-if curl -fsS --max-time 15 "${API_BASE}/healthz" >/dev/null 2>&1; then
+if curl -fsS --max-time 15 -H "ngrok-skip-browser-warning: true" "${API_BASE}/healthz" >/dev/null 2>&1; then
   ok "backend is reachable"
 else
   fail "backend did not respond at ${API_BASE}/healthz"
