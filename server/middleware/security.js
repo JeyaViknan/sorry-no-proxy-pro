@@ -68,7 +68,18 @@ function buildCors({ allowedOrigins }) {
 
     if (req.method === "OPTIONS") {
       res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+      // Every header the clients actually send must be listed here, or the
+      // browser blocks the real request after the preflight — and `fetch`
+      // reports it as a generic network failure, which reads to the user as
+      // "the server is down" rather than "a header was not permitted".
+      //
+      // ngrok-skip-browser-warning is sent by both clients to suppress
+      // ngrok's HTML interstitial. Omitting it here broke faculty sign-in
+      // completely while the API itself was perfectly healthy.
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type,Authorization,ngrok-skip-browser-warning"
+      );
       res.setHeader("Access-Control-Max-Age", "86400");
       return res.status(204).end();
     }

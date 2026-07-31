@@ -89,16 +89,21 @@ cat <<EOF
 
 $(bold "Deployed")
 
-  Faculty portal is live. Cloudflare printed the URL above — it looks like:
-    https://${PAGES_PROJECT}.pages.dev
+  Use the STABLE url, not the per-deploy preview url Cloudflare printed above:
 
-  ┌─ ONE MORE STEP ────────────────────────────────────────────────┐
-  │  The backend must allow that origin or sign-in will fail with   │
-  │  a CORS error. Put it in deploy.env:                            │
-  │                                                                 │
-  │      FACULTY_ORIGIN=https://${PAGES_PROJECT}.pages.dev
-  │                                                                 │
-  │  then re-run:  ./scripts/deploy-backend.sh                      │
-  └─────────────────────────────────────────────────────────────────┘
+      https://${PAGES_PROJECT}.pages.dev
+
+  Every deploy also gets a unique preview url (e.g. 7d93d0c8.${PAGES_PROJECT}.pages.dev).
+  Those are deliberately NOT allow-listed by the backend — allow-listing a
+  wildcard would let any Pages project on any account call your API.
+
+  If sign-in fails with a CORS error, the origin is not allow-listed. Set it:
+
+      FACULTY_ORIGIN=https://${PAGES_PROJECT}.pages.dev
+
+  in deploy.env, then restart the backend:
+
+      ./scripts/start-local.sh          (running locally via ngrok)
+      ./scripts/deploy-backend.sh       (running on Cloud Run)
 
 EOF
