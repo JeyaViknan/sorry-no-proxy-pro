@@ -40,6 +40,23 @@ if [[ -n "${GALLERY_DATASET:-}" ]]; then
   WORKDIR="$(mktemp -d)"
   trap 'rm -rf "$WORKDIR"' EXIT
 
+  # Hugging Face dataset repos ship a .gitattributes that routes *.npz through
+  # git-lfs. Without it, `git clone` dies mid-handshake with an unhelpful
+  # "the remote end hung up unexpectedly".
+  if ! command -v git-lfs >/dev/null; then
+    fail "git-lfs is not installed."
+    echo ""
+    echo "  Hugging Face stores .npz files with git-lfs. Install it:"
+    echo ""
+    echo "    macOS:          brew install git-lfs && git lfs install"
+    echo "    Ubuntu/Debian:  sudo apt install git-lfs && git lfs install"
+    echo "    Windows:        https://git-lfs.com  (then: git lfs install)"
+    echo ""
+    echo "  Then run this script again."
+    exit 1
+  fi
+  ok "git-lfs $(git-lfs version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+
   bold "Uploading to the private dataset ${REPO}"
   cat <<EOF
 

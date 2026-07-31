@@ -41,6 +41,8 @@ class FaceEngine:
         """
         # Imported lazily so that importing this module (for tests, tooling,
         # or --selftest) does not require the heavy dependencies.
+        import os
+
         import cv2  # noqa: F401  (ensures the OpenCV runtime is present early)
         from insightface.app import FaceAnalysis
 
@@ -53,14 +55,16 @@ class FaceEngine:
             "providers": ["CPUExecutionProvider"],
         }
 
-        import os
-
         model_root = os.environ.get("INSIGHTFACE_HOME")
         if model_root:
             kwargs["root"] = model_root
 
         app = FaceAnalysis(**kwargs)
-        app.prepare(ctx_id=-1, det_size=(640, 640))
+        # Detector input size. 640 is InsightFace's default; 480 uses
+        # noticeably less memory and is ample for a face that fills a phone
+        # selfie frame. Configurable so a 512MB host can be made to fit.
+        det = int(os.environ.get("FACE_DET_SIZE", "640"))
+        app.prepare(ctx_id=-1, det_size=(det, det))
         self._app = app
 
     @property
