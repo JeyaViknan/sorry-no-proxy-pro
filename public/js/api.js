@@ -89,7 +89,12 @@ async function attempt(path, { method = "GET", body, timeoutMs, signal } = {}) {
   try {
     const response = await fetch(path, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers: {
+        ...(body ? { "Content-Type": "application/json" } : {}),
+        // See the note in the faculty client: suppresses ngrok's HTML
+        // interstitial so API responses are always JSON. No-op elsewhere.
+        "ngrok-skip-browser-warning": "true",
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
       // Never let a stale cached response stand in for a live answer.

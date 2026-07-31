@@ -61,6 +61,12 @@ async function call(path, { method = "GET", body, token, timeoutMs = 10000 } = {
       headers: {
         ...(body ? { "Content-Type": "application/json" } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        // ngrok's free tier serves an HTML interstitial to anything that looks
+        // like a browser navigation. This portal is on a DIFFERENT origin from
+        // the backend, so it never receives the cookie that suppresses it —
+        // without this header every API call would return HTML and JSON.parse
+        // would fail with a baffling error. Harmless on any other host.
+        "ngrok-skip-browser-warning": "true",
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
@@ -153,7 +159,10 @@ export async function endSession({ token, sessionId }) {
  */
 export async function downloadExport({ token, sessionId, label }) {
   const response = await fetch(apiUrl(`/api/sessions/${sessionId}/export`), {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "ngrok-skip-browser-warning": "true",
+    },
     signal: AbortSignal.timeout(20000),
   });
 
